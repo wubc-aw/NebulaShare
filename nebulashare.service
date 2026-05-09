@@ -1,0 +1,16 @@
+[Unit]
+Description=NebulaShare - LAN File Share + Speedtest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/aw/vibeProjects/NebulaShare
+ExecStart=/home/aw/vibeProjects/NebulaShare/venv/bin/python /home/aw/vibeProjects/NebulaShare/app.py
+Restart=always
+RestartSec=5
+Environment="NEBULA_PORT=8080"
+Environment="NEBULA_DIR=/home/aw/vibeProjects/NebulaShare/uploads"
+
+[Install]
+WantedBy=default.target
