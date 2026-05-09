@@ -1559,6 +1559,20 @@ def api_system_stats():
         disk_total = disk_used = disk_free = 0
     disk_pct = (100.0 * disk_used / disk_total) if disk_total else 0.0
 
+    # ── Disk (external HDD /mnt/andrew) ──
+    HDD_MOUNT = "/mnt/andrew"
+    hdd_total = hdd_used = hdd_free = 0
+    hdd_pct = 0.0
+    hdd_mounted = False
+    try:
+        if os.path.ismount(HDD_MOUNT):
+            hdu = shutil.disk_usage(HDD_MOUNT)
+            hdd_total, hdd_used, hdd_free = hdu.total, hdu.used, hdu.free
+            hdd_pct = (100.0 * hdd_used / hdd_total) if hdd_total else 0.0
+            hdd_mounted = True
+    except Exception:
+        pass
+
     # ── Temp + throttle (Pi-specific, gracefully None on non-Pi) ──
     temp_c = _read_temp_c()
     throttle_raw, throttle_now, throttle_history = _read_throttle()
@@ -1587,6 +1601,9 @@ def api_system_stats():
             "mem_percent": round(mem_pct, 1),
             "disk_total": disk_total, "disk_used": disk_used, "disk_free": disk_free,
             "disk_percent": round(disk_pct, 1),
+            "hdd_total": hdd_total, "hdd_used": hdd_used, "hdd_free": hdd_free,
+            "hdd_percent": round(hdd_pct, 1),
+            "hdd_mounted": hdd_mounted,
             "temp_c": round(temp_c, 1) if temp_c is not None else None,
             "throttle_raw": throttle_raw,
             "throttle_now": throttle_now,
@@ -1596,6 +1613,208 @@ def api_system_stats():
             "updated": int(now),
         },
     })
+
+
+# ── Storage file manager (multi-device) ─────────────────────────────
+STORAGE_ROOTS = {
+    "/mnt/andrew": "移动硬盘",
+    "/": "SSD",
+}
+STORAGE_MAX_UPLOAD_MB = 1024  # 1 GB per upload safety limit
+
+
+def _get_storage_root(root_param):
+    """Validate and return a storage root path from user input."""
+    if not root_param:
+        return "/mnt/andrew"
+    # Only allow exact paths from the whitelist
+    for allowed in STORAGE_ROOTS:
+        if os.path.realpath(root_param) == os.path.realpath(allowed):
+            return allowed
+    return None
+
+
+def _validate_storage_path(rel, root):
+    """Prevent path traversal; return absolute path under root or None."""
+    if not root or root not in STORAGE_ROOTS:
+        return None
+    if not rel:
+        rel = ""
+    target = os.path.realpath(os.path.join(root, rel))
+    real_root = os.path.realpath(root)
+    # Use relpath to check target is inside or equal to real_root
+    try:
+        rel_to_root = os.path.relpath(target, real_root)
+    except ValueError:
+        return None
+    if rel_to_root.startswith(".."):
+        return None
+    return target
+
+
+def _storage_entry_info(p, name):
+    """Return dict describing a file or directory entry."""
+    try:
+        st = os.stat(p, follow_symlinks=False)
+        is_dir = os.path.isdir(p) and not os.path.islink(p)
+        info = {
+            "name": name,
+            "type": "dir" if is_dir else "file",
+            "size": st.st_size if not is_dir else 0,
+            "size_human": fmt_size(st.st_size) if not is_dir else "-",
+            "mtime": int(st.st_mtime),
+            "mtime_iso": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+        }
+        return info
+    except Exception:
+        return None
+
+
+@app.route("/api/storage/roots")
+def api_storage_roots():
+    roots = []
+    for path, label in STORAGE_ROOTS.items():
+        try:
+            if os.path.ismount(path) or (path == "/" and os.path.isdir(path)):
+                du = shutil.disk_usage(path)
+                roots.append({
+                    "path": path,
+                    "label": label,
+                    "total": du.total,
+                    "used": du.used,
+                    "free": du.free,
+                    "used_human": fmt_size(du.used),
+                    "total_human": fmt_size(du.total),
+                    "percent": round(100.0 * du.used / du.total, 1),
+                })
+        except Exception:
+            pass
+    return jsonify({"ok": True, "roots": roots})
+
+
+@app.route("/api/storage/files")
+def api_storage_files():
+    root = _get_storage_root(request.args.get("root", ""))
+    if root is None:
+        return jsonify({"ok": False, "error": "invalid root"}), 400
+    rel = request.args.get("path", "")
+    target = _validate_storage_path(rel, root)
+    if target is None:
+        return jsonify({"ok": False, "error": "invalid path"}), 400
+    if not os.path.isdir(target):
+        return jsonify({"ok": False, "error": "not a directory"}), 404
+    items = []
+    try:
+        for name in os.listdir(target):
+            # skip hidden
+            if name.startswith("."):
+                continue
+            p = os.path.join(target, name)
+            info = _storage_entry_info(p, name)
+            if info:
+                items.append(info)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    items.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
+    # compute usage bar
+    try:
+        du = shutil.disk_usage(root)
+        total, used = du.total, du.used
+    except Exception:
+        total = used = 0
+    return jsonify({
+        "ok": True,
+        "items": items,
+        "path": rel,
+        "root": root,
+        "root_label": STORAGE_ROOTS.get(root, root),
+        "total": total,
+        "used": used,
+        "used_human": fmt_size(used),
+        "total_human": fmt_size(total),
+        "percent": round(100.0 * used / total, 1) if total else 0.0,
+    })
+
+
+@app.route("/api/storage/upload", methods=["POST"])
+def api_storage_upload():
+    root = _get_storage_root(request.args.get("root", ""))
+    if root is None:
+        return jsonify({"ok": False, "error": "invalid root"}), 400
+    rel = request.args.get("path", "")
+    target = _validate_storage_path(rel, root)
+    if target is None or not os.path.isdir(target):
+        return jsonify({"ok": False, "error": "invalid path"}), 400
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "no file"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"ok": False, "error": "empty filename"}), 400
+    content_length = request.content_length
+    if content_length and content_length > STORAGE_MAX_UPLOAD_MB * 1024 * 1024:
+        return jsonify({"ok": False, "error": f"file too large (>{STORAGE_MAX_UPLOAD_MB}MB)"}), 413
+    name = safe_filename(f.filename)
+    dest = os.path.join(target, name)
+    if os.path.exists(dest):
+        base, ext = os.path.splitext(name)
+        counter = 1
+        while os.path.exists(dest):
+            dest = os.path.join(target, f"{base}_{counter}{ext}")
+            counter += 1
+        name = os.path.basename(dest)
+    f.save(dest)
+    return jsonify({"ok": True, "filename": name})
+
+
+@app.route("/api/storage/download")
+def api_storage_download():
+    root = _get_storage_root(request.args.get("root", ""))
+    if root is None:
+        return jsonify({"ok": False, "error": "invalid root"}), 400
+    rel = request.args.get("path", "")
+    target = _validate_storage_path(rel, root)
+    if target is None or not os.path.isfile(target):
+        return jsonify({"ok": False, "error": "not found"}), 404
+    return send_file(target, as_attachment=True, download_name=os.path.basename(target))
+
+
+@app.route("/api/storage/files", methods=["DELETE"])
+def api_storage_delete():
+    root = _get_storage_root(request.args.get("root", ""))
+    if root is None:
+        return jsonify({"ok": False, "error": "invalid root"}), 400
+    rel = request.args.get("path", "")
+    target = _validate_storage_path(rel, root)
+    if target is None:
+        return jsonify({"ok": False, "error": "invalid path"}), 400
+    if not os.path.exists(target):
+        return jsonify({"ok": False, "error": "not found"}), 404
+    try:
+        if os.path.isdir(target):
+            os.rmdir(target)
+        else:
+            os.remove(target)
+        return jsonify({"ok": True})
+    except OSError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/storage/mkdir", methods=["POST"])
+def api_storage_mkdir():
+    root = _get_storage_root(request.args.get("root", ""))
+    if root is None:
+        return jsonify({"ok": False, "error": "invalid root"}), 400
+    rel = request.args.get("path", "")
+    target = _validate_storage_path(rel, root)
+    if target is None:
+        return jsonify({"ok": False, "error": "invalid path"}), 400
+    if os.path.exists(target):
+        return jsonify({"ok": False, "error": "already exists"}), 409
+    try:
+        os.makedirs(target, exist_ok=False)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ── photo-cleaner reverse proxy ─────────────────────────────────────
@@ -3385,6 +3604,117 @@ input[type="file"] { display: none; }
   .mon-table .col-name { max-width: 100px; }
   .mon-table th, .mon-table td { padding: 7px 8px; font-size: 0.75rem; }
 }
+
+/* ── Storage File Manager ── */
+.storage-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  flex-wrap: wrap;
+}
+.storage-bar .usage-label { font-size: 0.78rem; color: var(--muted); }
+.storage-bar .usage-val { font-size: 0.85rem; color: var(--cyan); font-family: monospace; }
+.storage-bar .bar-outer {
+  flex: 1; min-width: 80px; height: 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px; overflow: hidden;
+}
+.storage-bar .bar-inner {
+  height: 100%;
+  background: linear-gradient(90deg, var(--cyan), var(--purple));
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.storage-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+  flex-wrap: wrap;
+}
+.storage-breadcrumb .crumb {
+  color: var(--cyan);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: background 0.15s;
+}
+.storage-breadcrumb .crumb:hover { background: rgba(0,240,255,0.08); }
+.storage-breadcrumb .sep { color: var(--muted); font-size: 0.7rem; }
+.storage-breadcrumb .crumb:last-child { color: var(--text); cursor: default; }
+.storage-breadcrumb .crumb:last-child:hover { background: transparent; }
+.storage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.storage-item {
+  background: var(--card);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 11px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+.storage-item:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0,240,255,0.05);
+  border-color: rgba(0,240,255,0.2);
+}
+.storage-item .s-icon {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  background: rgba(0,240,255,0.06);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+.storage-item .s-icon.folder { background: rgba(251,191,36,0.08); }
+.storage-item .s-info { flex: 1; min-width: 0; }
+.storage-item .s-name {
+  font-weight: 500; font-size: 0.9rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.storage-item .s-meta {
+  font-size: 0.75rem; color: var(--muted);
+  margin-top: 2px;
+}
+.storage-item .s-actions {
+  display: flex; gap: 6px; flex-shrink: 0;
+}
+.storage-empty {
+  text-align: center; padding: 36px; color: var(--muted); font-size: 0.9rem;
+}
+.storage-dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 14px;
+  padding: 28px 16px;
+  text-align: center;
+  background: var(--card);
+  transition: all 0.25s ease;
+  cursor: pointer;
+  margin-bottom: 14px;
+}
+.storage-dropzone.dragover {
+  border-color: var(--cyan);
+  background: rgba(0,240,255,0.06);
+}
+.storage-dropzone .s-dz-icon {
+  font-size: 1.6rem; margin-bottom: 6px; opacity: 0.7;
+}
+.storage-dropzone p {
+  font-size: 0.85rem; color: var(--muted); margin: 0;
+}
 </style>
 </head>
 <body>
@@ -3421,6 +3751,10 @@ input[type="file"] { display: none; }
     <div class="sys-chip neutral" id="chipUptime">
       <span class="icon">⏱</span>
       <div class="stack"><div class="label">运行</div><div class="value">--</div></div>
+    </div>
+    <div class="sys-chip neutral" id="chipHdd" style="display:none">
+      <span class="icon">💾</span>
+      <div class="stack"><div class="label">硬盘</div><div class="value">--</div></div>
     </div>
     <span class="sys-warn" id="sysWarn"></span>
     <span class="sys-meta" id="sysMeta"></span>
@@ -3501,6 +3835,41 @@ input[type="file"] { display: none; }
       </div>
 
       <div class="file-list" id="fileList"></div>
+    </div>
+  </div>
+
+  <!-- Storage File Manager Section -->
+  <div class="section" id="secStorage">
+    <div class="section-title" onclick="toggleSection('storage')">
+      <span>文件管理 · Storage</span>
+      <span class="caret">▾</span>
+    </div>
+    <div class="section-body">
+      <div class="ph-tabs" id="storageTabs" style="margin-bottom:14px">
+        <button class="ph-tab" data-root="/mnt/andrew" onclick="switchStorageRoot('/mnt/andrew')">移动硬盘</button>
+        <button class="ph-tab" data-root="/" onclick="switchStorageRoot('/')">SSD</button>
+      </div>
+      <div class="storage-bar" id="storageBar">
+        <span class="usage-label" id="storageBarLabel">--</span>
+        <div class="bar-outer"><div class="bar-inner" id="storageBarInner"></div></div>
+        <span class="usage-val" id="storageBarText">--</span>
+      </div>
+      <div class="storage-breadcrumb" id="storageBreadcrumb">
+        <span class="crumb" onclick="event.stopPropagation();navStorage('')">📁 根目录</span>
+      </div>
+      <div class="storage-toolbar" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        <button class="btn btn-primary btn-mini" onclick="document.getElementById('storageFileInput').click()">⬆ 上传文件</button>
+        <button class="btn btn-primary btn-mini" onclick="mkdirStorage()">📁 新建文件夹</button>
+        <button class="btn btn-mini" style="background:var(--card);border:1px solid var(--border);color:var(--muted);" onclick="loadStorage()">↻ 刷新</button>
+      </div>
+      <input type="file" id="storageFileInput" multiple style="display:none" onchange="handleStorageUpload(event)">
+      <div id="storageDropzone" class="storage-dropzone" style="display:none">
+        <div class="s-dz-icon">📂</div>
+        <p>拖拽文件到此处上传</p>
+      </div>
+      <div class="storage-list" id="storageList">
+        <div class="storage-empty">加载中…</div>
+      </div>
     </div>
   </div>
 
@@ -3958,7 +4327,7 @@ function toggleSection(key) {
   } catch (e) {}
 }
 (function restoreSectionState() {
-  ['file','gw','reach','speed','photo','monitor'].forEach(k => {
+  ['file','storage','gw','reach','speed','photo','monitor'].forEach(k => {
     try {
       if (localStorage.getItem('nebula:collapse:' + k) === '1') {
         const el = document.getElementById('sec' + k.charAt(0).toUpperCase() + k.slice(1));
@@ -4176,6 +4545,161 @@ dropzone.addEventListener('drop', e => {
   handleFiles(e.dataTransfer.files);
 });
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+// ── Storage File Manager ──
+let _storagePath = '';
+let _storageRoot = '/mnt/andrew';
+let _storageUploading = 0;
+
+function _storageQ(root, path) {
+  const qs = new URLSearchParams();
+  if (root) qs.set('root', root);
+  if (path) qs.set('path', path);
+  const s = qs.toString();
+  return s ? '?' + s : '';
+}
+
+function switchStorageRoot(root) {
+  _storageRoot = root;
+  _storagePath = '';
+  document.querySelectorAll('#storageTabs .ph-tab').forEach(t => {
+    t.classList.toggle('on', t.dataset.root === root);
+  });
+  loadStorage();
+}
+
+async function loadStorage() {
+  const list = document.getElementById('storageList');
+  try {
+    const r = await fetch('/api/storage/files' + _storageQ(_storageRoot, _storagePath));
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'unknown');
+    renderStorage(d);
+  } catch (e) {
+    if (list) list.innerHTML = '<div class="storage-empty" style="color:var(--danger)">加载失败: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderStorage(d) {
+  // device label
+  const barLabel = document.getElementById('storageBarLabel');
+  if (barLabel) barLabel.textContent = d.root_label || '存储';
+
+  // usage bar
+  const barInner = document.getElementById('storageBarInner');
+  const barText = document.getElementById('storageBarText');
+  if (barInner) barInner.style.width = Math.min(100, d.percent) + '%';
+  if (barText) barText.textContent = d.used_human + ' / ' + d.total_human + ' (' + d.percent + '%)';
+
+  // breadcrumb
+  const bc = document.getElementById('storageBreadcrumb');
+  if (bc) {
+    const parts = _storagePath.split('/').filter(Boolean);
+    let html = `<span class="crumb" onclick="event.stopPropagation();navStorage('')">📁 根目录</span>`;
+    let build = '';
+    for (let i = 0; i < parts.length; i++) {
+      build += (build ? '/' : '') + parts[i];
+      html += `<span class="sep">/</span><span class="crumb" onclick="event.stopPropagation();navStorage('${escAttr(build)}')">${escHtml(parts[i])}</span>`;
+    }
+    bc.innerHTML = html;
+  }
+
+  // list
+  const list = document.getElementById('storageList');
+  if (!list) return;
+  if (!d.items || !d.items.length) {
+    list.innerHTML = '<div class="storage-empty">目录为空</div>';
+    return;
+  }
+  list.innerHTML = d.items.map((it, i) => {
+    const isDir = it.type === 'dir';
+    const icon = isDir ? '📁' : '📄';
+    const iconCls = isDir ? 's-icon folder' : 's-icon';
+    const click = isDir ? `onclick="event.stopPropagation();enterStorageDir('${escAttr(it.name)}')"` : '';
+    const meta = isDir ? '文件夹' : (it.size_human + ' · ' + it.mtime_iso);
+    const dlPath = encodeURIComponent(_storagePath ? _storagePath + '/' + it.name : it.name);
+    const dl = isDir ? '' : `<a class="btn btn-primary btn-mini" href="/api/storage/download${_storageQ(_storageRoot, _storagePath ? _storagePath + '/' + it.name : it.name)}" download>下载</a>`;
+    return `<div class="storage-item" style="animation-delay:${i*0.03}s" ${click}>
+      <div class="${iconCls}">${icon}</div>
+      <div class="s-info">
+        <div class="s-name" title="${escAttr(it.name)}">${escHtml(it.name)}</div>
+        <div class="s-meta">${escHtml(meta)}</div>
+      </div>
+      <div class="s-actions">
+        ${dl}
+        <button class="btn btn-danger btn-mini" onclick="event.stopPropagation();deleteStorageItem('${escAttr(it.name)}')">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function enterStorageDir(name) {
+  _storagePath = _storagePath ? _storagePath + '/' + name : name;
+  loadStorage();
+}
+
+function navStorage(path) {
+  _storagePath = path;
+  loadStorage();
+}
+
+async function deleteStorageItem(name) {
+  const rel = _storagePath ? _storagePath + '/' + name : name;
+  if (!confirm('确定要删除 "' + name + '" 吗？')) return;
+  try {
+    const r = await fetch('/api/storage/files' + _storageQ(_storageRoot, rel), { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) { showToast('已删除'); loadStorage(); }
+    else { showToast('删除失败: ' + (d.error || '')); }
+  } catch (e) { showToast('删除失败: ' + e.message); }
+}
+
+async function mkdirStorage() {
+  const name = prompt('新建文件夹名称:');
+  if (!name || !name.trim()) return;
+  const rel = _storagePath ? _storagePath + '/' + name.trim() : name.trim();
+  try {
+    const r = await fetch('/api/storage/mkdir' + _storageQ(_storageRoot, rel), { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) { showToast('已创建'); loadStorage(); }
+    else { showToast('创建失败: ' + (d.error || '')); }
+  } catch (e) { showToast('创建失败: ' + e.message); }
+}
+
+async function handleStorageUpload(ev) {
+  const files = ev.target.files;
+  if (!files.length) return;
+  for (const file of files) {
+    _storageUploading++;
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const r = await fetch('/api/storage/upload' + _storageQ(_storageRoot, _storagePath), { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'HTTP ' + r.status);
+    } catch (e) {
+      showToast('上传失败: ' + file.name + ' - ' + e.message);
+    }
+    _storageUploading--;
+  }
+  if (!_storageUploading) { showToast('上传完成'); loadStorage(); }
+  ev.target.value = '';
+}
+
+// Auto-load storage when section is expanded
+document.addEventListener('click', function(e) {
+  const title = e.target.closest('.section-title');
+  if (!title) return;
+  const section = title.closest('.section');
+  if (section && section.id === 'secStorage' && !section.classList.contains('collapsed')) {
+    // Ensure default tab is active on first open
+    const tabs = document.querySelectorAll('#storageTabs .ph-tab');
+    if (tabs.length && !Array.from(tabs).some(t => t.classList.contains('on'))) {
+      tabs[0].classList.add('on');
+    }
+    loadStorage();
+  }
+});
 
 const PRESETS = {
   remove_people: '精确擦除画面中的所有路人、游客和无关人物,保持主体人物和背景环境完全不变',
@@ -4965,6 +5489,21 @@ async function loadSystemStats() {
       'neutral',
       '已运行 ' + fmtUptime(s.uptime_s)
         + '  · 开机 ' + new Date(s.boot_at * 1000).toLocaleString('zh-CN'));
+
+    // External HDD chip
+    const hddChip = document.getElementById('chipHdd');
+    if (hddChip) {
+      if (s.hdd_mounted) {
+        hddChip.style.display = '';
+        paintSysChip('chipHdd',
+          Math.round(s.hdd_percent) + '%',
+          sysThreshold(s.hdd_percent, 80, 95),
+          '移动硬盘 ' + fmtBytes(s.hdd_used) + ' / ' + fmtBytes(s.hdd_total)
+            + '  · 剩余 ' + fmtBytes(s.hdd_free));
+      } else {
+        hddChip.style.display = 'none';
+      }
+    }
 
     const w = document.getElementById('sysWarn');
     if (w) {
