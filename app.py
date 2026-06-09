@@ -17,7 +17,8 @@ import urllib.error
 from io import BytesIO
 from datetime import datetime, timedelta
 
-from flask import Flask, request, send_file, jsonify, Response, stream_with_context
+from flask import Flask, request, send_file, send_from_directory, jsonify, Response, stream_with_context
+from werkzeug.utils import safe_join
 import qrcode
 import yaml
 import requests
@@ -244,6 +245,10 @@ def cleaner_loop():
 
 @app.route("/")
 def index():
+    # Serve new frontend if available, fallback to legacy inline page
+    static_index = os.path.join(STATIC_DIR, "index.html")
+    if os.path.isfile(static_index):
+        return send_from_directory(STATIC_DIR, "index.html")
     ips = get_local_ips()
     urls = [f"http://{ip}:{PORT}" for ip in ips]
     primary_url = urls[0]
@@ -256,7 +261,11 @@ def index():
                            .replace("{{PRIMARY_URL}}", primary_url)
                            .replace("{{PI_IP}}", primary_ip)
                            .replace("{{PHONE_IP_EXAMPLE}}", phone_ip_example)
-                           .replace("{{QR}}", qr),
+                           .replace("{{QR}}", qr)
+                           .replace("{{PC_NAME}}", PC_NAME)
+                           .replace("{{PC_IP}}", PC_IP)
+                           .replace("{{PC_MAC}}", PC_MAC)
+                           .replace("{{PC_SSH_USER}}", PC_SSH_USER),
                     mimetype="text/html")
 
 
@@ -933,14 +942,31 @@ def _fetch_subscription(url, timeout=30):
         "User-Agent": "clash.meta/v1.19 (mihomo)",
         "Accept": "*/*",
     })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.URLError as e:
+        # Surface TLS/network details for easier debugging.
+        err = str(e.reason) if hasattr(e, "reason") else str(e)
+        print(f"[mihomo] subscription fetch failed for {mask_url(url)}: {err}")
+        raise RuntimeError(f"无法拉取订阅 ({err})") from e
     text = raw.decode("utf-8", errors="replace")
+    # Some converters return base64-wrapped YAML; try decoding.
+    if not text.strip().startswith(("proxies:", "---", "#", "port:", "mixed-port:")):
+        try:
+            import base64
+            decoded = base64.b64decode(text.strip()).decode("utf-8", errors="replace")
+            if "proxies:" in decoded:
+                text = decoded
+        except Exception:
+            pass
     parsed = yaml.safe_load(text)
     if not isinstance(parsed, dict):
-        raise ValueError("subscription did not return a YAML mapping")
+        preview = text[:200].replace("\n", " ")
+        raise ValueError(f"subscription did not return a YAML mapping (got: {preview})")
     if "proxies" not in parsed:
-        raise ValueError("subscription has no 'proxies' field")
+        preview = text[:200].replace("\n", " ")
+        raise ValueError(f"subscription has no 'proxies' field (preview: {preview})")
     return parsed
 
 
@@ -1074,6 +1100,57 @@ def mihomo_sub_refresh():
     })
 
 
+@app.route("/api/mihomo/sub/upload-yaml", methods=["POST"])
+def mihomo_sub_upload_yaml():
+    """Receive raw Clash YAML from frontend, parse it, replace config, restart mihomo.
+    This is the escape-hatch when automatic URL fetch fails (e.g. TLS issues)."""
+    body = request.get_json(silent=True) or {}
+    raw_yaml = (body.get("yaml") or "").strip()
+    if not raw_yaml:
+        return jsonify({"ok": False, "error": "yaml content is empty"}), 400
+
+    # Parse the pasted YAML
+    try:
+        parsed = yaml.safe_load(raw_yaml)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"YAML parse failed: {e}"}), 400
+
+    if not isinstance(parsed, dict):
+        return jsonify({"ok": False, "error": "YAML root is not a mapping"}), 400
+
+    new_proxies = parsed.get("proxies") or []
+    new_groups = parsed.get("proxy-groups") or []
+    new_rules = parsed.get("rules") or []
+
+    if not new_proxies:
+        return jsonify({"ok": False, "error": "pasted config has no 'proxies' field"}), 400
+
+    # Write + restart
+    ok, msg = _replace_mihomo_config(new_proxies, new_groups, new_rules)
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 500
+
+    # Wait for mihomo to come back up
+    started = time.time()
+    while time.time() - started < 10:
+        v = mihomo_get("/version", timeout=1)
+        if isinstance(v, dict) and v.get("version"):
+            break
+        time.sleep(0.5)
+
+    state = load_mihomo_state()
+    state["last_update"] = int(time.time())
+    state["last_proxy_count"] = len(new_proxies)
+    # Note: we don't touch subscription_url here since user bypassed URL fetch
+    save_mihomo_state(state)
+    return jsonify({
+        "ok": True,
+        "proxy_count": len(new_proxies),
+        "group_count": len(new_groups),
+        "rule_count": len(new_rules),
+    })
+
+
 @app.route("/api/mihomo/restart", methods=["POST"])
 def mihomo_restart():
     r = subprocess.run(["sudo", "-n", "systemctl", "restart", MIHOMO_SERVICE],
@@ -1099,6 +1176,54 @@ def mihomo_stop():
     if r.returncode != 0:
         return jsonify({"ok": False, "error": r.stderr.strip()}), 500
     return jsonify({"ok": True})
+
+
+# ── Routes: Daily News ──────────────────────────────────────────────
+DAILY_NEWS_DIR = os.path.expanduser("~/.hermes/daily-news")
+
+@app.route("/api/daily-news")
+def daily_news_list():
+    """List all daily news HTML files."""
+    items = []
+    if os.path.isdir(DAILY_NEWS_DIR):
+        for fn in sorted(os.listdir(DAILY_NEWS_DIR), reverse=True):
+            if fn.startswith("daily-news-") and fn.endswith(".html"):
+                # daily-news-YYYY-MM-DD.html
+                date_str = fn.replace("daily-news-", "").replace(".html", "")
+                path = os.path.join(DAILY_NEWS_DIR, fn)
+                mtime = os.path.getmtime(path)
+                mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+                items.append({
+                    "filename": fn,
+                    "title": f"每日信息播报 - {date_str}",
+                    "date": date_str,
+                    "mtime": mtime_str,
+                    "category": "AI/金融摘要"
+                })
+    return jsonify({"items": items})
+
+@app.route("/api/daily-news/view/<path:filename>")
+def daily_news_view(filename):
+    """View a daily news HTML file inline."""
+    safe_name = safe_filename(filename)
+    if not safe_name.startswith("daily-news-") or not safe_name.endswith(".html"):
+        return jsonify({"error": "invalid filename"}), 400
+    path = os.path.join(DAILY_NEWS_DIR, safe_name)
+    if not os.path.isfile(path):
+        return jsonify({"error": "not found"}), 404
+    return send_file(path, mimetype="text/html")
+
+@app.route("/api/daily-news/download/<path:filename>")
+def daily_news_download(filename):
+    """Download a daily news HTML file."""
+    safe_name = safe_filename(filename)
+    if not safe_name.startswith("daily-news-") or not safe_name.endswith(".html"):
+        return jsonify({"error": "invalid filename"}), 400
+    path = os.path.join(DAILY_NEWS_DIR, safe_name)
+    if not os.path.isfile(path):
+        return jsonify({"error": "not found"}), 404
+    return send_file(path, mimetype="text/html",
+                     as_attachment=True, download_name=safe_name)
 
 
 # ── Routes: Reachability check ──────────────────────────────────────
@@ -1207,6 +1332,100 @@ def reach_check_all():
     return jsonify({"ok": True, "results": [r for r in results if r is not None]})
 
 
+# ── PC Console: Wake-on-LAN + Status + Shutdown ─────────────────────
+
+PC_IP = os.environ.get("PC_IP", "192.168.50.206")
+PC_MAC = os.environ.get("PC_MAC", "34:5A:60:CE:E6:DB")
+PC_NAME = os.environ.get("PC_NAME", "Windows PC")
+PC_SSH_USER = os.environ.get("PC_SSH_USER", "aw")
+PC_SSH_KEY = os.environ.get("PC_SSH_KEY", "")
+WOL_BROADCAST = os.environ.get("WOL_BROADCAST", "")
+
+
+@app.route("/api/pc/status")
+def api_pc_status():
+    """Ping the PC to check if it's online."""
+    try:
+        r = subprocess.run(
+            ["ping", "-c", "1", "-W", "2", PC_IP],
+            capture_output=True, text=True, timeout=5
+        )
+        online = r.returncode == 0
+        # Extract RTT from ping output (e.g., "time=0.526 ms")
+        rtt = None
+        if online:
+            m = __import__("re").search(r"time=([\d.]+)\s*ms", r.stdout)
+            if m:
+                rtt = round(float(m.group(1)), 2)
+        return jsonify({
+            "ok": True,
+            "online": online,
+            "ip": PC_IP,
+            "mac": PC_MAC,
+            "name": PC_NAME,
+            "rtt_ms": rtt,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/wol", methods=["POST"])
+def api_wol():
+    """Send Wake-on-LAN magic packet via wakeonlan CLI."""
+    body = request.get_json(silent=True) or {}
+    mac = (body.get("mac") or PC_MAC).strip().upper()
+    # Validate MAC format
+    if not mac or len(mac.replace(":", "")) != 12:
+        return jsonify({"ok": False, "error": "invalid MAC address"}), 400
+    cmd = ["wakeonlan", mac]
+    if WOL_BROADCAST:
+        cmd.extend(["-i", WOL_BROADCAST])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return jsonify({"ok": False, "error": r.stderr.strip() or "wakeonlan failed"}), 500
+        return jsonify({"ok": True, "mac": mac, "output": r.stdout.strip()})
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "wakeonlan command not found. Run: sudo apt install wakeonlan"}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "wakeonlan timeout"}), 504
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/pc/shutdown", methods=["POST"])
+def api_pc_shutdown():
+    """SSH into Windows PC and execute shutdown command."""
+    try:
+        cmd = [
+            "ssh",
+            "-o", "ConnectTimeout=5",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+        ]
+        if PC_SSH_KEY and os.path.isfile(PC_SSH_KEY):
+            cmd.extend(["-i", PC_SSH_KEY])
+        cmd.append(f"{PC_SSH_USER}@{PC_IP}")
+        cmd.append("shutdown /s /t 0")
+
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        # ssh may return 255 on connection failure, or 0 on success
+        # Windows shutdown command doesn't wait, so success usually means ssh succeeded
+        if r.returncode == 0:
+            return jsonify({"ok": True})
+        # Some versions return 1 even if shutdown was triggered
+        if "shutdown" in r.stderr.lower() or "logoff" in r.stderr.lower():
+            return jsonify({"ok": True, "warn": "command may have succeeded"})
+        err = r.stderr.strip() or r.stdout.strip() or f"ssh exit code {r.returncode}"
+        return jsonify({"ok": False, "error": err}), 502
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "ssh command not found. Run: sudo apt install openssh-client"}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "ssh connection timeout"}), 504
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ── Routes: System Stats ────────────────────────────────────────────
 # Pure on-demand: no background thread. Each call to /api/system/stats
 # samples /proc files (μs) + one vcgencmd shell-out (~5ms). CPU% is
@@ -1285,6 +1504,22 @@ def _read_throttle():
 # Cache for process CPU sampling: pid -> (utime+stime, system_total, timestamp)
 _proc_cpu_cache = {}
 _proc_cpu_cache_ts = 0.0
+
+_SC_CLK_TCK = os.sysconf(os.sysconf_names.get('SC_CLK_TCK', 2)) if hasattr(os, 'sysconf') else 100
+
+
+def _get_boot_time():
+    """Read system boot time from /proc/stat (cached)."""
+    try:
+        with open("/proc/stat", "r") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+
+_BOOT_TIME = _get_boot_time()
 
 
 def _read_proc_utime_stime(pid):
@@ -1413,6 +1648,14 @@ def _read_processes():
                 sparts = stat[idx + 1 :].split()
                 ppid = int(sparts[1])
 
+                # starttime is field 22 (0-indexed 19 from state)
+                starttime_ticks = int(sparts[19]) if len(sparts) > 19 else 0
+                if _BOOT_TIME and _SC_CLK_TCK:
+                    proc_start = _BOOT_TIME + starttime_ticks / _SC_CLK_TCK
+                    runtime_seconds = max(0, int(time.time() - proc_start))
+                else:
+                    runtime_seconds = 0
+
                 # /proc/<pid>/status
                 proc_name = ""
                 uid = 0
@@ -1467,6 +1710,7 @@ def _read_processes():
                         "uid": uid,
                         "cpu_percent": round(cpu_pct, 1) if cpu_pct is not None else None,
                         "mem_bytes": vm_rss,
+                        "runtime_seconds": runtime_seconds,
                         "is_daemon": is_daemon,
                         "service_name": service_name,
                         "auto_restart": auto_restart,
@@ -1868,6 +2112,916 @@ def photo_proxy(subpath):
                         headers=out_headers)
     except requests.RequestException as e:
         return jsonify({"ok": False, "error": f"photo-cleaner 不可达: {e}"}), 503
+
+
+# ── Claude History API ──────────────────────────────────────────────
+CLAUDE_HISTORY_DIR = "/home/aw/vibeProjects/claude-history/data"
+CLAUDE_HISTORY_FILE = os.path.join(CLAUDE_HISTORY_DIR, "history.json")
+CLAUDE_DEVICES_DIR = os.path.join(CLAUDE_HISTORY_DIR, "devices")
+os.makedirs(CLAUDE_DEVICES_DIR, exist_ok=True)
+
+
+def _load_all_devices_data():
+    """加载所有设备的历史数据并合并"""
+    all_sessions = []
+    all_projects = {}
+    devices_info = {}
+    total_messages = 0
+    all_categories = {}
+    all_styles = {}
+    total_tokens = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0, "estimatedCostUSD": 0.0}
+
+    # 加载设备历史数据：合并 devices/（API 上传）和 data/ 根目录（Git 同步）
+    # 同一设备取修改时间最新的文件
+    candidate_files = {}  # hostname -> (fpath, mtime)
+
+    def _scan_dir(dir_path):
+        if not os.path.isdir(dir_path):
+            return
+        for fname in os.listdir(dir_path):
+            if fname.startswith("history-") and fname.endswith(".json"):
+                fpath = os.path.join(dir_path, fname)
+                hostname = fname.replace("history-", "").replace(".json", "")
+                mtime = os.path.getmtime(fpath)
+                if hostname not in candidate_files or mtime > candidate_files[hostname][1]:
+                    candidate_files[hostname] = (fpath, mtime)
+
+    _scan_dir(CLAUDE_DEVICES_DIR)
+    _scan_dir(CLAUDE_HISTORY_DIR)
+
+    sources = [(h, candidate_files[h][0]) for h in candidate_files]
+
+    for hostname, fpath in sources:
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        meta = data.get("meta", {})
+        machine_info = meta.get("machineInfo", {})
+        device_name = machine_info.get("hostname", hostname)
+        device_id = machine_info.get("machineId", hostname)
+
+        devices_info[device_id] = {
+            "hostname": device_name,
+            "machineId": device_id,
+            "localIp": machine_info.get("localIp", "unknown"),
+            "platform": machine_info.get("platform", "unknown"),
+            "lastSync": meta.get("generatedAt", ""),
+            "sessions": meta.get("totalSessions", 0),
+            "messages": meta.get("totalMessages", 0),
+        }
+
+        # 合并项目统计
+        for proj, count in meta.get("projects", {}).items():
+            all_projects[proj] = all_projects.get(proj, 0) + count
+
+        # 合并分类和风格统计
+        for cat, count in meta.get("categoryDistribution", {}).items():
+            all_categories[cat] = all_categories.get(cat, 0) + count
+        for style, count in meta.get("styleDistribution", {}).items():
+            all_styles[style] = all_styles.get(style, 0) + count
+
+        # 合并 token 统计
+        toks = meta.get("totalTokens", {})
+        for k in ["input", "output", "cacheRead", "cacheWrite", "total"]:
+            total_tokens[k] += toks.get(k, 0)
+        total_tokens["estimatedCostUSD"] += toks.get("estimatedCostUSD", 0)
+
+        # 为每条会话和消息标记设备来源
+        for session in data.get("sessions", []):
+            session["deviceId"] = device_id
+            session["deviceName"] = device_name
+            for msg in session.get("messages", []):
+                msg.setdefault("machineId", device_id)
+                msg.setdefault("hostname", device_name)
+            all_sessions.append(session)
+            total_messages += session.get("messageCount", 0)
+
+    # 按时间倒序排列
+    all_sessions.sort(key=lambda x: x.get("startTimeMs", 0), reverse=True)
+
+    return {
+        "meta": {
+            "generatedAt": datetime.now().isoformat(),
+            "totalSessions": len(all_sessions),
+            "totalMessages": total_messages,
+            "projects": all_projects,
+            "devices": devices_info,
+            "deviceCount": len(devices_info),
+            "categoryDistribution": all_categories,
+            "styleDistribution": all_styles,
+            "totalTokens": total_tokens,
+        },
+        "sessions": all_sessions,
+    }
+
+
+@app.route("/api/claude-history")
+def claude_history():
+    """返回所有设备的 Claude Code 历史会话数据（合并视图）"""
+    data = _load_all_devices_data()
+    return jsonify(data)
+
+
+@app.route("/api/claude-history/sync", methods=["POST"])
+def claude_history_sync():
+    """接收其他设备上传的历史数据"""
+    try:
+        payload = request.get_json(force=True)
+        if not payload:
+            return jsonify({"ok": False, "error": "Empty payload"}), 400
+
+        meta = payload.get("meta", {})
+        machine_info = meta.get("machineInfo", {})
+        hostname = machine_info.get("hostname", "unknown")
+        machine_id = machine_info.get("machineId", "unknown")
+
+        # 增量合并：如果该设备已有数据，合并新旧会话
+        device_file = os.path.join(CLAUDE_DEVICES_DIR, f"history-{hostname}.json")
+        merged_payload = payload
+        if os.path.isfile(device_file):
+            try:
+                with open(device_file, encoding="utf-8") as f:
+                    old_data = json.load(f)
+                old_sessions = {s["sessionId"]: s for s in old_data.get("sessions", [])}
+                new_sessions = {s["sessionId"]: s for s in payload.get("sessions", [])}
+                # 新会话覆盖旧会话，保留旧会话中不存在的
+                old_sessions.update(new_sessions)
+                merged_sessions = list(old_sessions.values())
+                merged_sessions.sort(key=lambda x: x.get("startTimeMs", 0), reverse=True)
+                merged_payload = dict(payload)
+                merged_payload["sessions"] = merged_sessions
+                merged_payload["meta"] = dict(meta)
+                merged_payload["meta"]["totalSessions"] = len(merged_sessions)
+                merged_payload["meta"]["totalMessages"] = sum(s.get("messageCount", 0) for s in merged_sessions)
+                # Token 统计也需要重新累加
+                tok = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0, "cost": 0.0}
+                for s in merged_sessions:
+                    t = s.get("totalTokens", {})
+                    for k in tok:
+                        if k == "cost":
+                            tok[k] += t.get("estimatedCostUSD", 0)
+                        else:
+                            tok[k] += t.get(k, 0)
+                merged_payload["meta"]["totalTokens"] = {
+                    "input": int(tok["input"]),
+                    "output": int(tok["output"]),
+                    "cacheRead": int(tok["cacheRead"]),
+                    "cacheWrite": int(tok["cacheWrite"]),
+                    "total": int(tok["total"]),
+                    "estimatedCostUSD": round(tok["cost"], 4),
+                }
+            except Exception:
+                pass
+
+        with open(device_file, "w", encoding="utf-8") as f:
+            json.dump(merged_payload, f, ensure_ascii=False, indent=2)
+
+        # 同时更新索引
+        index_file = os.path.join(CLAUDE_DEVICES_DIR, "index.json")
+        index_data = {}
+        if os.path.isfile(index_file):
+            try:
+                with open(index_file, encoding="utf-8") as f:
+                    index_data = json.load(f)
+            except Exception:
+                pass
+
+        index_data[hostname] = {
+            "machineId": machine_id,
+            "lastSync": meta.get("generatedAt", ""),
+            "sessions": meta.get("totalSessions", 0),
+            "messages": meta.get("totalMessages", 0),
+            "localIp": machine_info.get("localIp", "unknown"),
+            "platform": machine_info.get("platform", "unknown"),
+        }
+        with open(index_file, "w", encoding="utf-8") as f:
+            json.dump(index_data, f, ensure_ascii=False, indent=2)
+
+        return jsonify({
+            "ok": True,
+            "message": f"Received {meta.get('totalSessions', 0)} sessions from {hostname}",
+            "hostname": hostname,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/claude-history/devices")
+def claude_history_devices():
+    """返回已连接的设备列表"""
+    index_file = os.path.join(CLAUDE_DEVICES_DIR, "index.json")
+    if os.path.isfile(index_file):
+        try:
+            with open(index_file, encoding="utf-8") as f:
+                return jsonify(json.load(f))
+        except Exception:
+            pass
+    return jsonify({})
+
+
+@app.route("/api/claude-history/upload", methods=["POST"])
+def claude_history_upload():
+    """接收其他电脑上传的 Claude 历史数据文件 (ZIP/JSON/JSONL)"""
+    import zipfile
+    import shutil
+
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "no file"}), 400
+
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"ok": False, "error": "empty filename"}), 400
+
+    hostname = request.form.get("hostname", "unknown-device")
+    hostname = "".join(c for c in hostname if c.isalnum() or c in "-_").strip("-_")
+    if not hostname:
+        hostname = "unknown-device"
+
+    upload_tmp = os.path.join("/tmp", f"claude-upload-{hostname}-{int(time.time())}")
+    os.makedirs(upload_tmp, exist_ok=True)
+
+    try:
+        filename = f.filename.lower()
+
+        if filename.endswith(".zip"):
+            zip_path = os.path.join(upload_tmp, "upload.zip")
+            f.save(zip_path)
+            with zipfile.ZipFile(zip_path, 'r') as z:
+                z.extractall(upload_tmp)
+            os.remove(zip_path)
+        elif filename.endswith(".json"):
+            f.save(os.path.join(upload_tmp, "history.json"))
+        elif filename.endswith(".jsonl"):
+            f.save(os.path.join(upload_tmp, "history.jsonl"))
+        else:
+            return jsonify({"ok": False, "error": "unsupported format, use .zip/.json/.jsonl"}), 400
+
+        def find_file(root, name):
+            for dirpath, _dirnames, filenames in os.walk(root):
+                if name in filenames:
+                    return os.path.join(dirpath, name)
+            return None
+
+        history_file = find_file(upload_tmp, "history.json") or find_file(upload_tmp, "history.jsonl")
+        if not history_file:
+            return jsonify({"ok": False, "error": "no history.json/jsonl found in upload"}), 400
+
+        dest_file = os.path.join(CLAUDE_DEVICES_DIR, f"history-{hostname}.json")
+        os.makedirs(CLAUDE_DEVICES_DIR, exist_ok=True)
+
+        if history_file.endswith(".jsonl"):
+            sessions = []
+            session_msgs = {}
+            with open(history_file, encoding="utf-8") as fp:
+                for line in fp:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    sid = obj.get("sessionId", "unknown")
+                    if sid not in session_msgs:
+                        session_msgs[sid] = []
+                    session_msgs[sid].append({
+                        "role": "user",
+                        "text": obj.get("display", ""),
+                        "timestamp": datetime.fromtimestamp(obj.get("timestamp", 0) / 1000).isoformat(),
+                    })
+            for sid, msgs in session_msgs.items():
+                if not msgs:
+                    continue
+                sessions.append({
+                    "sessionId": sid,
+                    "title": msgs[0]["text"][:60],
+                    "project": "/unknown",
+                    "messageCount": len(msgs),
+                    "messages": msgs,
+                })
+            output = {
+                "meta": {
+                    "generatedAt": datetime.now().isoformat(),
+                    "totalSessions": len(sessions),
+                    "totalMessages": sum(s["messageCount"] for s in sessions),
+                    "machineInfo": {"hostname": hostname, "platform": "unknown"},
+                },
+                "sessions": sessions,
+            }
+            with open(dest_file, "w", encoding="utf-8") as fp:
+                json.dump(output, fp, ensure_ascii=False, indent=2)
+        else:
+            shutil.copy2(history_file, dest_file)
+
+        shutil.rmtree(upload_tmp, ignore_errors=True)
+
+        index_file = os.path.join(CLAUDE_DEVICES_DIR, "index.json")
+        index_data = {}
+        if os.path.isfile(index_file):
+            try:
+                with open(index_file, encoding="utf-8") as fp:
+                    index_data = json.load(fp)
+            except Exception:
+                pass
+
+        try:
+            with open(dest_file, encoding="utf-8") as fp:
+                saved_data = json.load(fp)
+            meta = saved_data.get("meta", {})
+            index_data[hostname] = {
+                "lastSync": datetime.now().isoformat(),
+                "sessions": meta.get("totalSessions", 0),
+                "messages": meta.get("totalMessages", 0),
+                "file": f"history-{hostname}.json",
+            }
+        except Exception:
+            index_data[hostname] = {
+                "lastSync": datetime.now().isoformat(),
+                "sessions": 0,
+                "messages": 0,
+                "file": f"history-{hostname}.json",
+            }
+
+        with open(index_file, "w", encoding="utf-8") as fp:
+            json.dump(index_data, fp, ensure_ascii=False, indent=2)
+
+        return jsonify({
+            "ok": True,
+            "message": f"Uploaded and saved for {hostname}",
+            "hostname": hostname,
+            "sessions": index_data[hostname].get("sessions", 0),
+        })
+
+    except Exception as e:
+        shutil.rmtree(upload_tmp, ignore_errors=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── Claude History Scan & Process ───────────────────────────────────
+
+CLAUDE_HISTORY_SOURCE = os.path.expanduser("~/.claude/history.jsonl")
+CLAUDE_HISTORY_TOOLS_DIR = "/home/aw/vibeProjects/claude-history"
+
+
+def _count_history_jsonl():
+    """统计 history.jsonl 中的记录数"""
+    result = {
+        "exists": False,
+        "filePath": CLAUDE_HISTORY_SOURCE,
+        "fileSize": 0,
+        "totalLines": 0,
+        "validLines": 0,
+        "sessionIds": set(),
+        "earliestTimestamp": None,
+        "latestTimestamp": None,
+    }
+    if not os.path.isfile(CLAUDE_HISTORY_SOURCE):
+        return result
+
+    result["exists"] = True
+    result["fileSize"] = os.path.getsize(CLAUDE_HISTORY_SOURCE)
+
+    try:
+        with open(CLAUDE_HISTORY_SOURCE, encoding="utf-8") as f:
+            for line in f:
+                result["totalLines"] += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    result["validLines"] += 1
+                    sid = obj.get("sessionId")
+                    if sid:
+                        result["sessionIds"].add(sid)
+                    ts = obj.get("timestamp")
+                    if ts:
+                        if result["earliestTimestamp"] is None or ts < result["earliestTimestamp"]:
+                            result["earliestTimestamp"] = ts
+                        if result["latestTimestamp"] is None or ts > result["latestTimestamp"]:
+                            result["latestTimestamp"] = ts
+                except json.JSONDecodeError:
+                    pass
+    except Exception:
+        pass
+
+    return result
+
+
+@app.route("/api/claude-history/scan")
+def claude_history_scan():
+    """扫描服务器本地的 history.jsonl，返回统计信息"""
+    stats = _count_history_jsonl()
+    sessions = list(stats["sessionIds"])
+    sessions.sort()
+
+    # 检查已有数据
+    has_extracted = os.path.isfile(CLAUDE_HISTORY_FILE)
+    has_graph = os.path.isfile(_KNOWLEDGE_GRAPH_FILE)
+    has_analysis = os.path.isfile(_KNOWLEDGE_ANALYSIS_FILE)
+
+    existing = {}
+    if has_extracted:
+        try:
+            with open(CLAUDE_HISTORY_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            meta = data.get("meta", {})
+            existing = {
+                "totalSessions": meta.get("totalSessions", 0),
+                "totalMessages": meta.get("totalMessages", 0),
+                "generatedAt": meta.get("generatedAt", ""),
+            }
+        except Exception:
+            pass
+
+    return jsonify({
+        "ok": True,
+        "source": {
+            "exists": stats["exists"],
+            "filePath": stats["filePath"],
+            "fileSize": stats["fileSize"],
+            "fileSizeHuman": _fmt_bytes(stats["fileSize"]) if stats["fileSize"] else "0 B",
+            "totalLines": stats["totalLines"],
+            "validLines": stats["validLines"],
+            "sessionCount": len(sessions),
+            "sessions": sessions[:20],  # 最多返回20个会话ID
+            "earliest": datetime.fromtimestamp(stats["earliestTimestamp"] / 1000).isoformat() if stats["earliestTimestamp"] else None,
+            "latest": datetime.fromtimestamp(stats["latestTimestamp"] / 1000).isoformat() if stats["latestTimestamp"] else None,
+        },
+        "existing": existing,
+        "hasExtracted": has_extracted,
+        "hasGraph": has_graph,
+        "hasAnalysis": has_analysis,
+    })
+
+
+def _fmt_bytes(n):
+    """格式化字节数"""
+    for unit in ["B", "KB", "MB", "GB"]:
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+@app.route("/api/claude-history/process", methods=["POST"])
+def claude_history_process():
+    """一键处理：提取 → 建图 → 分析"""
+    import subprocess
+
+    result = {
+        "ok": True,
+        "steps": [],
+        "totalTimeMs": 0,
+    }
+    start_time = time.time()
+
+    # Step 1: Extract
+    step_start = time.time()
+    try:
+        extractor_path = os.path.join(CLAUDE_HISTORY_TOOLS_DIR, "extractor.py")
+        if not os.path.isfile(extractor_path):
+            result["steps"].append({
+                "name": "extract",
+                "status": "skipped",
+                "message": "extractor.py not found",
+            })
+        else:
+            proc = subprocess.run(
+                [sys.executable, extractor_path],
+                cwd=CLAUDE_HISTORY_TOOLS_DIR,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            success = proc.returncode == 0
+            result["steps"].append({
+                "name": "extract",
+                "status": "done" if success else "error",
+                "message": f"exit={proc.returncode}, sessions extracted" if success else f"exit={proc.returncode}: {proc.stderr[:200]}",
+                "durationMs": round((time.time() - step_start) * 1000),
+            })
+    except subprocess.TimeoutExpired:
+        result["steps"].append({
+            "name": "extract",
+            "status": "error",
+            "message": "timeout after 300s",
+            "durationMs": round((time.time() - step_start) * 1000),
+        })
+    except Exception as e:
+        result["steps"].append({
+            "name": "extract",
+            "status": "error",
+            "message": str(e),
+            "durationMs": round((time.time() - step_start) * 1000),
+        })
+
+    # Step 1.5: Merge all device data into history.json for unified graph building
+    step_start = time.time()
+    try:
+        merged = _load_all_devices_data()
+        with open(CLAUDE_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+        result["steps"].append({
+            "name": "merge",
+            "status": "done",
+            "message": f"Merged {merged['meta'].get('deviceCount', 0)} devices, {merged['meta'].get('totalSessions', 0)} sessions",
+            "durationMs": round((time.time() - step_start) * 1000),
+        })
+    except Exception as e:
+        result["steps"].append({
+            "name": "merge",
+            "status": "warn",
+            "message": f"merge skipped: {str(e)[:200]}",
+            "durationMs": round((time.time() - step_start) * 1000),
+        })
+
+    # Step 2: Build Graph
+    step_start = time.time()
+    try:
+        graph_path = os.path.join(CLAUDE_HISTORY_TOOLS_DIR, "extractor_graph.py")
+        if not os.path.isfile(graph_path):
+            result["steps"].append({
+                "name": "graph",
+                "status": "skipped",
+                "message": "extractor_graph.py not found",
+            })
+        else:
+            proc = subprocess.run(
+                [sys.executable, graph_path],
+                cwd=CLAUDE_HISTORY_TOOLS_DIR,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            success = proc.returncode == 0
+            result["steps"].append({
+                "name": "graph",
+                "status": "done" if success else "error",
+                "message": f"exit={proc.returncode}, graph built" if success else f"exit={proc.returncode}: {proc.stderr[:200]}",
+                "durationMs": round((time.time() - step_start) * 1000),
+            })
+    except subprocess.TimeoutExpired:
+        result["steps"].append({
+            "name": "graph",
+            "status": "error",
+            "message": "timeout after 300s",
+            "durationMs": round((time.time() - step_start) * 1000),
+        })
+    except Exception as e:
+        result["steps"].append({
+            "name": "graph",
+            "status": "error",
+            "message": str(e),
+            "durationMs": round((time.time() - step_start) * 1000),
+        })
+
+    # Step 3: Analyze (optional - may take long)
+    step_start = time.time()
+    try:
+        analyzer_path = os.path.join(CLAUDE_HISTORY_TOOLS_DIR, "analyzer.py")
+        if not os.path.isfile(analyzer_path):
+            result["steps"].append({
+                "name": "analyze",
+                "status": "skipped",
+                "message": "analyzer.py not found",
+            })
+        else:
+            proc = subprocess.run(
+                [sys.executable, analyzer_path],
+                cwd=CLAUDE_HISTORY_TOOLS_DIR,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            success = proc.returncode == 0
+            result["steps"].append({
+                "name": "analyze",
+                "status": "done" if success else "error",
+                "message": f"exit={proc.returncode}, analysis complete" if success else f"exit={proc.returncode}: {proc.stderr[:200]}",
+                "durationMs": round((time.time() - step_start) * 1000),
+            })
+    except subprocess.TimeoutExpired:
+        result["steps"].append({
+            "name": "analyze",
+            "status": "error",
+            "message": "timeout after 600s",
+            "durationMs": round((time.time() - step_start) * 1000),
+        })
+    except Exception as e:
+        result["steps"].append({
+            "name": "analyze",
+            "status": "error",
+            "message": str(e),
+            "durationMs": round((time.time() - step_start) * 1000),
+        })
+
+    result["totalTimeMs"] = round((time.time() - start_time) * 1000)
+
+    # Check final state
+    if os.path.isfile(CLAUDE_HISTORY_FILE):
+        try:
+            with open(CLAUDE_HISTORY_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            meta = data.get("meta", {})
+            result["finalState"] = {
+                "totalSessions": meta.get("totalSessions", 0),
+                "totalMessages": meta.get("totalMessages", 0),
+                "hasGraph": os.path.isfile(_KNOWLEDGE_GRAPH_FILE),
+                "hasAnalysis": os.path.isfile(_KNOWLEDGE_ANALYSIS_FILE),
+            }
+        except Exception:
+            pass
+
+    return jsonify(result)
+
+
+# ── Knowledge Base API ──────────────────────────────────────────────
+
+# CORS headers for all knowledge API routes
+@app.after_request
+def add_cors_headers(response):
+    """Add CORS headers to allow frontend cross-origin access."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return response
+
+
+# Shared data paths
+_KNOWLEDGE_DATA_DIR = "/home/aw/vibeProjects/claude-history/data"
+_KNOWLEDGE_GRAPH_FILE = os.path.join(_KNOWLEDGE_DATA_DIR, "graph.json")
+_KNOWLEDGE_ANALYSIS_FILE = os.path.join(_KNOWLEDGE_DATA_DIR, "analysis.json")
+_KNOWLEDGE_HISTORY_FILE = os.path.join(_KNOWLEDGE_DATA_DIR, "history.json")
+_KNOWLEDGE_VALUE_FILTER_FILE = os.path.join(_KNOWLEDGE_DATA_DIR, "value_filter.json")
+
+
+def _load_json_safe(path, default=None):
+    """Load JSON file safely, return default on any error."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _load_graph():
+    """Load graph.json with fallback."""
+    return _load_json_safe(_KNOWLEDGE_GRAPH_FILE, {"nodes": [], "edges": []})
+
+
+def _load_analysis():
+    """Load analysis.json with fallback."""
+    return _load_json_safe(_KNOWLEDGE_ANALYSIS_FILE, {"userProfile": {}, "sessionAnalyses": [], "meta": {}})
+
+
+def _load_history():
+    """Load history.json with fallback."""
+    return _load_json_safe(_KNOWLEDGE_HISTORY_FILE, {"sessions": []})
+
+
+@app.route("/api/knowledge/graph")
+def knowledge_graph():
+    """返回知识图谱数据（读取 graph.json）"""
+    data = _load_graph()
+    analysis = _load_analysis()
+    # 合并分析元数据到图谱响应
+    return jsonify({
+        "ok": True,
+        "meta": data.get("meta", {}),
+        "stats": data.get("stats", {}),
+        "nodes": data.get("nodes", []),
+        "edges": data.get("edges", []),
+        "analysisMeta": analysis.get("meta", {}),
+    })
+
+
+@app.route("/api/knowledge/profile")
+def knowledge_profile():
+    """返回用户画像（读取 analysis.json 的 userProfile）"""
+    analysis = _load_analysis()
+    profile = analysis.get("userProfile", {})
+    if not profile:
+        return jsonify({"ok": False, "error": "profile not found"}), 404
+    return jsonify({
+        "ok": True,
+        "profile": profile,
+        "meta": analysis.get("meta", {}),
+    })
+
+
+@app.route("/api/knowledge/sessions")
+def knowledge_sessions():
+    """按价值过滤返回会话列表
+
+    Query params:
+        value: high | medium | low | all (default: all)
+    """
+    value = request.args.get("value", "all").lower()
+
+    history = _load_history()
+    analysis = _load_analysis()
+    sessions = history.get("sessions", [])
+
+    # 加载价值过滤配置
+    value_map = {}
+    if os.path.isfile(_KNOWLEDGE_VALUE_FILTER_FILE):
+        value_map = _load_json_safe(_KNOWLEDGE_VALUE_FILTER_FILE, {})
+
+    # 从 analysis.json 构建 sessionId -> analysis 映射
+    analysis_map = {}
+    for sa in analysis.get("sessionAnalyses", []):
+        sid = sa.get("sessionId")
+        if sid:
+            analysis_map[sid] = sa.get("analysis", {})
+
+    if value != "all":
+        sessions = [s for s in sessions if value_map.get(s.get("sessionId"), "medium") == value]
+
+    # 合并返回统一格式
+    result = []
+    for s in sessions[:50]:
+        sid = s.get("sessionId")
+        ana = analysis_map.get(sid, {})
+        result.append({
+            "sessionId": sid,
+            "title": s.get("title"),
+            "project": s.get("project"),
+            "startTime": s.get("startTime"),
+            "messageCount": s.get("messageCount"),
+            "categories": s.get("categories", []),
+            "value": value_map.get(sid, "medium"),
+            # 合并 LLM 分析结果
+            "analysis": {
+                "background": ana.get("background", ""),
+                "problem": ana.get("problem", ""),
+                "solution": ana.get("solution", ""),
+                "mood": ana.get("mood", ""),
+                "thinking": ana.get("thinking", ""),
+                "style": ana.get("style", ""),
+                "risk": ana.get("risk", ""),
+                "tech": ana.get("tech", []),
+                "role": ana.get("role", ""),
+            } if ana else None,
+        })
+
+    return jsonify({"ok": True, "sessions": result, "total": len(result)})
+
+
+@app.route("/api/knowledge/entities")
+def knowledge_entities():
+    """返回特定类型的实体列表
+
+    Query params:
+        type: 实体类型过滤，如 technology, concept, problem, decision, project, session
+              不传则返回所有类型统计
+    """
+    entity_type = request.args.get("type", "").capitalize()
+    graph = _load_graph()
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+
+    if entity_type:
+        filtered = [n for n in nodes if n.get("type") == entity_type]
+        # 为每个实体附加关联边信息
+        node_ids = {n.get("id") for n in filtered}
+        related_edges = [
+            e for e in edges
+            if e.get("source") in node_ids or e.get("target") in node_ids
+        ]
+        return jsonify({
+            "ok": True,
+            "type": entity_type,
+            "total": len(filtered),
+            "entities": filtered,
+            "relatedEdges": related_edges[:200],  # 限制边数量
+        })
+    else:
+        # 返回所有类型统计
+        type_counts = {}
+        for n in nodes:
+            t = n.get("type", "Unknown")
+            type_counts[t] = type_counts.get(t, 0) + 1
+        return jsonify({
+            "ok": True,
+            "typeCounts": type_counts,
+            "totalNodes": len(nodes),
+            "totalEdges": len(edges),
+        })
+
+
+@app.route("/api/knowledge/search")
+def knowledge_search():
+    """搜索知识库内容
+
+    Query params:
+        q: 搜索关键词
+    """
+    query = request.args.get("q", "").lower().strip()
+    if not query:
+        return jsonify({"ok": True, "results": [], "total": 0})
+
+    history = _load_history()
+    graph = _load_graph()
+    analysis = _load_analysis()
+
+    results = []
+    seen_ids = set()
+
+    # 1. 搜索 history.json 中的会话
+    for s in history.get("sessions", []):
+        sid = s.get("sessionId")
+        title = s.get("title", "")
+        msgs = s.get("messages", [])
+        match = False
+        match_field = ""
+
+        if query in title.lower():
+            match = True
+            match_field = "title"
+        else:
+            for m in msgs[:10]:
+                text = m.get("text", "")
+                if query in text.lower():
+                    match = True
+                    match_field = "message"
+                    break
+
+        if match and sid not in seen_ids:
+            seen_ids.add(sid)
+            results.append({
+                "id": sid,
+                "type": "session",
+                "title": title,
+                "project": s.get("project"),
+                "preview": (msgs[0].get("text", "")[:120] + "...") if msgs and msgs[0].get("text") else "",
+                "matchField": match_field,
+                "messageCount": s.get("messageCount", 0),
+            })
+
+    # 2. 搜索 graph.json 中的节点
+    for n in graph.get("nodes", []):
+        nid = n.get("id")
+        title = n.get("title", "")
+        summary = n.get("summary", "")
+        if query in title.lower() or query in summary.lower():
+            if nid not in seen_ids:
+                seen_ids.add(nid)
+                results.append({
+                    "id": nid,
+                    "type": n.get("type", "node").lower(),
+                    "title": title,
+                    "summary": summary[:120] + "..." if len(summary) > 120 else summary,
+                    "matchField": "title" if query in title.lower() else "summary",
+                    "nodeType": n.get("type"),
+                })
+
+    # 3. 搜索 analysis.json 中的会话分析
+    for sa in analysis.get("sessionAnalyses", []):
+        sid = sa.get("sessionId")
+        ana = sa.get("analysis", {})
+        title = sa.get("title", "")
+        if query in title.lower() or query in ana.get("background", "").lower():
+            if sid not in seen_ids:
+                seen_ids.add(sid)
+                results.append({
+                    "id": sid,
+                    "type": "analysis",
+                    "title": title,
+                    "preview": ana.get("background", "")[:120] + "...",
+                    "matchField": "title" if query in title.lower() else "background",
+                    "mood": ana.get("mood", ""),
+                    "role": ana.get("role", ""),
+                })
+
+    return jsonify({"ok": True, "results": results[:30], "total": len(results)})
+
+
+# ── Static Frontend (Next.js export) ────────────────────────────────
+STATIC_DIR = "/home/aw/vibeProjects/NebulaShare/static"
+
+
+@app.route("/<path:filename>")
+def static_catchall(filename):
+    """Serve Next.js exported static files; fall back to index.html for SPA routes."""
+    # Skip API routes (Flask matches /api/* before this catch-all, but belt-and-suspenders)
+    if filename.startswith("api/"):
+        return jsonify({"error": "not found"}), 404
+
+    target = safe_join(STATIC_DIR, filename)
+    if target and os.path.isfile(target):
+        return send_from_directory(STATIC_DIR, filename)
+
+    # SPA fallback: serve index.html for unknown paths (client-side routing)
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return send_from_directory(STATIC_DIR, "index.html")
+
+    # Transition fallback: if static export isn't deployed yet, serve inline page
+    return index()
 
 
 # ── HTML Frontend ───────────────────────────────────────────────────
@@ -3557,6 +4711,7 @@ input[type="file"] { display: none; }
 .mon-table .col-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 .mon-table .col-cpu { width: 60px; text-align: right; font-family: monospace; }
 .mon-table .col-mem { width: 80px; text-align: right; font-family: monospace; }
+.mon-table .col-runtime { width: 80px; text-align: right; font-family: monospace; font-size: 0.78rem; }
 .mon-table .col-cmd {
   max-width: 300px;
   overflow: hidden;
@@ -3603,6 +4758,251 @@ input[type="file"] { display: none; }
   .mon-table .col-cmd { max-width: 120px; }
   .mon-table .col-name { max-width: 100px; }
   .mon-table th, .mon-table td { padding: 7px 8px; font-size: 0.75rem; }
+}
+
+/* ── PC Console ── */
+.pc-card {
+  padding: 20px 22px;
+  background: var(--card);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  margin-bottom: 14px;
+}
+.pc-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.pc-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.pc-icon {
+  width: 52px; height: 52px;
+  border-radius: 14px;
+  background: rgba(0,240,255,0.08);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.6rem;
+  flex-shrink: 0;
+  transition: all 0.3s;
+}
+.pc-icon.online {
+  background: rgba(74,222,128,0.1);
+  box-shadow: 0 0 16px rgba(74,222,128,0.15);
+}
+.pc-icon.offline {
+  background: rgba(255,56,96,0.08);
+  filter: grayscale(0.6);
+}
+.pc-meta { display: flex; flex-direction: column; gap: 2px; }
+.pc-name {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.5px;
+}
+.pc-ip {
+  font-family: "SF Mono", monospace;
+  font-size: 0.82rem;
+  color: var(--cyan);
+  letter-spacing: 0.5px;
+}
+.pc-mac {
+  font-family: "SF Mono", monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+}
+.pc-rtt {
+  font-family: "SF Mono", monospace;
+  font-size: 0.85rem;
+  color: var(--muted);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  padding: 6px 14px;
+  border-radius: 999px;
+}
+.pc-rtt.online {
+  color: #4ade80;
+  border-color: rgba(74,222,128,0.2);
+  background: rgba(74,222,128,0.06);
+}
+.pc-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+.pc-actions .btn {
+  flex: 1;
+  justify-content: center;
+  padding: 10px 20px;
+}
+.pc-actions .btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+/* PC status LED in section title */
+.pc-led {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  font-family: "SF Mono", monospace;
+  letter-spacing: 1px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.pc-led .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.2);
+  display: inline-block;
+}
+.pc-led.online .dot {
+  background: #4ade80;
+  box-shadow: 0 0 10px #4ade80;
+  animation: pulse 1.5s ease infinite;
+}
+.pc-led.online { color: #4ade80; }
+.pc-led.offline .dot { background: var(--danger); box-shadow: 0 0 10px var(--danger); }
+.pc-led.offline { color: var(--danger); }
+
+/* PC help panel */
+.pc-help {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.pc-help-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s;
+  user-select: none;
+}
+.pc-help-toggle:hover { color: var(--cyan); }
+.pc-help-toggle .caret {
+  font-size: 0.82rem;
+  transition: transform 0.22s;
+}
+.pc-help.collapsed .caret { transform: rotate(-90deg); }
+.pc-help.collapsed .pc-help-body { display: none; }
+.pc-help-body {
+  padding: 4px 16px 16px;
+  animation: sectionExpand 0.25s ease-out;
+}
+.pc-help-step {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.pc-help-num {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: rgba(0,240,255,0.12);
+  border: 1px solid rgba(0,240,255,0.25);
+  color: var(--cyan);
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: "SF Mono", monospace;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.pc-help-content {
+  flex: 1;
+  font-size: 0.84rem;
+  color: var(--text);
+  line-height: 1.5;
+}
+.pc-help-content strong { color: var(--cyan); font-weight: 500; }
+.pc-help-content pre {
+  margin-top: 6px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.pc-help-content code {
+  font-family: "SF Mono", "Cascadia Mono", monospace;
+  font-size: 0.78rem;
+  color: var(--cyan);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.pc-help-note {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(251,191,36,0.06);
+  border: 1px solid rgba(251,191,36,0.15);
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.pc-help-note code {
+  background: rgba(0,240,255,0.08);
+  border: 1px solid rgba(0,240,255,0.15);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.78rem;
+  color: var(--cyan);
+  font-family: "SF Mono", monospace;
+}
+
+/* ── Daily News ── */
+.news-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.news-item {
+  background: var(--card);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  transition: all 0.2s ease;
+}
+.news-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(0,240,255,0.06);
+  border-color: rgba(0,240,255,0.25);
+}
+.news-info {
+  flex: 1;
+  min-width: 0;
+}
+.news-title {
+  font-weight: 500;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.news-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.news-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 /* ── Storage File Manager ── */
@@ -3761,6 +5161,77 @@ input[type="file"] { display: none; }
     <button class="sys-refresh" id="sysRefresh" onclick="refreshSysNow()" title="立即刷新">↻</button>
   </div>
 
+  <!-- PC Console Section -->
+  <div class="section" id="secWol">
+    <div class="section-title" onclick="toggleSection('wol')">
+      <span>PC控制台 · Remote Control</span>
+      <span style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <span class="pc-led" id="pcLed"><span class="dot"></span><span id="pcLedText">检测中...</span></span>
+      </span>
+    </div>
+    <div class="section-body">
+      <div class="pc-card">
+        <div class="pc-main">
+          <div class="pc-info">
+            <div class="pc-icon" id="pcIcon">🖥</div>
+            <div class="pc-meta">
+              <div class="pc-name" id="pcName">{{PC_NAME}}</div>
+              <div class="pc-ip" id="pcIp">{{PC_IP}}</div>
+              <div class="pc-mac" id="pcMac">{{PC_MAC}}</div>
+            </div>
+          </div>
+          <div class="pc-rtt" id="pcRtt">--</div>
+        </div>
+        <div class="pc-actions">
+          <button class="btn btn-glow" id="btnWol" onclick="sendWol()">
+            <span id="wolPulse" style="display:none" class="speed-pulse"></span>唤醒 PC
+          </button>
+          <button class="btn btn-danger" id="btnShutdown" onclick="sendShutdown()" style="background:rgba(255,56,96,0.08);color:var(--danger);border:1px solid rgba(255,56,96,0.18);">
+            <span id="shutdownPulse" style="display:none" class="speed-pulse"></span>关闭 PC
+          </button>
+        </div>
+      </div>
+
+      <div class="pc-help" id="pcHelp">
+        <div class="pc-help-toggle" onclick="togglePcHelp()">
+          <span>⚙ Windows OpenSSH 配置引导</span>
+          <span class="caret" id="pcHelpCaret">▾</span>
+        </div>
+        <div class="pc-help-body" id="pcHelpBody">
+          <div class="pc-help-step">
+            <div class="pc-help-num">1</div>
+            <div class="pc-help-content">
+              <strong>在 Windows PC 上以管理员身份打开 PowerShell，执行：</strong>
+              <pre><code>Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Start-Service sshd
+Set-Service -Name sshd -StartupType 'Automatic'
+New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22</code></pre>
+            </div>
+          </div>
+          <div class="pc-help-step">
+            <div class="pc-help-num">2</div>
+            <div class="pc-help-content">
+              <strong>在树莓派上生成 SSH 密钥并复制到 PC：</strong>
+              <pre><code>ssh-keygen -t ed25519 -C "nebulashare" -f ~/.ssh/nebulashare
+ssh-copy-id -i ~/.ssh/nebulashare.pub {{PC_SSH_USER}}@{{PC_IP}}</code></pre>
+            </div>
+          </div>
+          <div class="pc-help-step">
+            <div class="pc-help-num">3</div>
+            <div class="pc-help-content">
+              <strong>在树莓派上设置环境变量（~/.bashrc 或 ~/.profile）：</strong>
+              <pre><code>export PC_SSH_KEY="$HOME/.ssh/nebulashare"
+export PC_SSH_USER="{{PC_SSH_USER}}"</code></pre>
+            </div>
+          </div>
+          <div class="pc-help-note">
+            <strong>提示：</strong>如果你使用密码登录而非密钥，请在 PC 上先手动执行一次 <code>ssh {{PC_SSH_USER}}@{{PC_IP}}</code> 并接受主机密钥。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Process Monitor Section -->
   <div class="section" id="secMonitor">
     <div class="section-title" onclick="toggleSection('monitor')">
@@ -3787,13 +5258,14 @@ input[type="file"] { display: none; }
               <th class="col-name" onclick="sortMonProcesses('name')">进程 <span class="sort-arrow">↕</span></th>
               <th class="col-cpu" onclick="sortMonProcesses('cpu')">CPU <span class="sort-arrow">↕</span></th>
               <th class="col-mem" onclick="sortMonProcesses('mem')">内存 <span class="sort-arrow">↕</span></th>
+              <th class="col-runtime" onclick="sortMonProcesses('runtime')">运行时间 <span class="sort-arrow">↕</span></th>
               <th class="col-cmd">命令行</th>
               <th class="col-daemon">状态</th>
               <th class="col-act">操作</th>
             </tr>
           </thead>
           <tbody id="monTbody">
-            <tr><td colspan="7" class="mon-empty">点击刷新加载进程列表</td></tr>
+            <tr><td colspan="8" class="mon-empty">点击刷新加载进程列表</td></tr>
           </tbody>
         </table>
       </div>
@@ -3803,6 +5275,19 @@ input[type="file"] { display: none; }
   <div class="topbar">
     <div class="ip-box">{{PRIMARY_URL}}</div>
     <div class="qr-wrap"><img src="{{QR}}" alt="qr"></div>
+  </div>
+
+  <!-- Daily News Section -->
+  <div class="section" id="secNews">
+    <div class="section-title" onclick="toggleSection('news')">
+      <span>每日摘要</span>
+      <span class="caret">▾</span>
+    </div>
+    <div class="section-body">
+      <div class="news-list" id="newsList">
+        <div class="mon-empty">加载中...</div>
+      </div>
+    </div>
   </div>
 
   <!-- File Share Section -->
@@ -3946,12 +5431,35 @@ input[type="file"] { display: none; }
             <span class="accent" style="background:var(--pink);box-shadow:0 0 8px var(--pink)"></span>
             订阅 &amp; 操作
           </h4>
-          <div class="gw-row">
-            <label>订阅链接</label>
-            <input class="gw-input" id="gwSubInput" placeholder="https://gateway.example.com/sub/..." spellcheck="false">
-            <button class="btn btn-primary btn-mini" onclick="saveSubUrl()">保存</button>
-            <button class="btn btn-glow btn-mini" onclick="refreshSub()" id="btnRefreshSub">更新订阅</button>
+          <div class="ph-tabs" style="margin-bottom:12px">
+            <button class="ph-tab on" id="tabSubUrl" onclick="switchSubMode('url')">🔗 URL 订阅</button>
+            <button class="ph-tab" id="tabSubYaml" onclick="switchSubMode('yaml')">📝 手动粘贴配置</button>
           </div>
+
+          <!-- URL subscription pane -->
+          <div id="subPaneUrl">
+            <div class="gw-row">
+              <label>订阅链接</label>
+              <input class="gw-input" id="gwSubInput" placeholder="https://gateway.example.com/sub/..." spellcheck="false">
+              <button class="btn btn-primary btn-mini" onclick="saveSubUrl()">保存</button>
+              <button class="btn btn-glow btn-mini" onclick="refreshSub()" id="btnRefreshSub">更新订阅</button>
+            </div>
+          </div>
+
+          <!-- Manual YAML paste pane -->
+          <div id="subPaneYaml" style="display:none">
+            <div class="gw-row" style="flex-direction:column;align-items:stretch;gap:8px">
+              <textarea class="gw-input" id="gwYamlInput"
+                placeholder="在此粘贴完整的 Clash YAML 配置（含 proxies / proxy-groups / rules）..."
+                style="min-height:200px;resize:vertical;font-family:'SF Mono','Cascadia Mono',monospace;font-size:0.78rem;line-height:1.5"
+                spellcheck="false"></textarea>
+              <div style="display:flex;gap:8px;justify-content:flex-end">
+                <button class="btn btn-primary btn-mini" onclick="clearSubYaml()">清空</button>
+                <button class="btn btn-glow btn-mini" onclick="uploadSubYaml()" id="btnUploadYaml">✨ 应用配置</button>
+              </div>
+            </div>
+          </div>
+
           <div class="gw-row">
             <label>上次更新</label>
             <span id="gwSubMeta" style="color:var(--muted);font-size:0.82rem">--</span>
@@ -3965,7 +5473,7 @@ input[type="file"] { display: none; }
             </div>
             <button class="btn btn-danger btn-mini" style="margin-left:auto" onclick="restartMihomo()">重启 mihomo</button>
           </div>
-          <div class="gw-muted-hint">订阅更新会拉取链接、覆盖 <code>/etc/mihomo/config.yaml</code> 的 <code>proxies/proxy-groups/rules</code>，并重启服务（自动备份原文件）</div>
+          <div class="gw-muted-hint" id="gwSubHint">订阅更新会拉取链接、覆盖 <code>/etc/mihomo/config.yaml</code> 的 <code>proxies/proxy-groups/rules</code>，并重启服务（自动备份原文件）</div>
         </div>
 
         <div class="glass gw-card">
@@ -4327,7 +5835,7 @@ function toggleSection(key) {
   } catch (e) {}
 }
 (function restoreSectionState() {
-  ['file','storage','gw','reach','speed','photo','monitor'].forEach(k => {
+  ['file','storage','gw','reach','speed','photo','monitor','news','wol'].forEach(k => {
     try {
       if (localStorage.getItem('nebula:collapse:' + k) === '1') {
         const el = document.getElementById('sec' + k.charAt(0).toUpperCase() + k.slice(1));
@@ -4762,6 +6270,141 @@ document.addEventListener('drop', e => e.preventDefault());
 
 loadFiles();
 setInterval(loadFiles, 15000);
+
+// ── PC Console ──
+let _pcOnline = null;
+let _pcPollTimer = null;
+const PC_POLL_MS = 5000;
+
+function setPcLed(online) {
+  const led = document.getElementById('pcLed');
+  const text = document.getElementById('pcLedText');
+  const icon = document.getElementById('pcIcon');
+  const rtt = document.getElementById('pcRtt');
+  if (!led) return;
+  led.classList.remove('online', 'offline');
+  icon.classList.remove('online', 'offline');
+  rtt.classList.remove('online');
+  if (online) {
+    led.classList.add('online');
+    icon.classList.add('online');
+    rtt.classList.add('online');
+    text.textContent = '在线';
+  } else {
+    led.classList.add('offline');
+    icon.classList.add('offline');
+    text.textContent = '离线';
+  }
+}
+
+function setPcButtons(online) {
+  const wolBtn = document.getElementById('btnWol');
+  const shutdownBtn = document.getElementById('btnShutdown');
+  if (wolBtn) wolBtn.disabled = online === true;
+  if (shutdownBtn) shutdownBtn.disabled = online === false;
+}
+
+async function loadPcStatus() {
+  try {
+    const r = await fetch('/api/pc/status');
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    _pcOnline = d.online;
+    setPcLed(d.online);
+    setPcButtons(d.online);
+    const rttEl = document.getElementById('pcRtt');
+    if (rttEl) {
+      rttEl.textContent = d.online
+        ? (d.rtt_ms != null ? d.rtt_ms + ' ms' : '在线')
+        : '离线';
+    }
+  } catch (e) {
+    _pcOnline = false;
+    setPcLed(false);
+    setPcButtons(false);
+    const rttEl = document.getElementById('pcRtt');
+    if (rttEl) rttEl.textContent = '检测失败';
+  }
+}
+
+async function sendWol() {
+  const btn = document.getElementById('btnWol');
+  const pulse = document.getElementById('wolPulse');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  pulse.style.display = 'inline-block';
+  const origText = btn.childNodes[btn.childNodes.length - 1].textContent;
+  btn.childNodes[btn.childNodes.length - 1].textContent = ' 发送中...';
+  try {
+    const r = await fetch('/api/wol', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    const d = await r.json();
+    if (d.ok) {
+      showToast('唤醒魔法包已发送 🖥✨');
+      // Start polling more aggressively after wake
+      setTimeout(loadPcStatus, 2000);
+      setTimeout(loadPcStatus, 5000);
+      setTimeout(loadPcStatus, 10000);
+    } else {
+      showToast('唤醒失败: ' + (d.error || '未知错误'));
+    }
+  } catch (e) {
+    showToast('唤醒请求失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    pulse.style.display = 'none';
+    btn.childNodes[btn.childNodes.length - 1].textContent = origText;
+  }
+}
+
+async function sendShutdown() {
+  if (!confirm('确定要远程关闭 PC 吗？')) return;
+  const btn = document.getElementById('btnShutdown');
+  const pulse = document.getElementById('shutdownPulse');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  pulse.style.display = 'inline-block';
+  const origText = btn.childNodes[btn.childNodes.length - 1].textContent;
+  btn.childNodes[btn.childNodes.length - 1].textContent = ' 发送中...';
+  try {
+    const r = await fetch('/api/pc/shutdown', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      showToast('关机命令已发送 🖥💤');
+      // Poll to see when it goes offline
+      setTimeout(loadPcStatus, 3000);
+      setTimeout(loadPcStatus, 6000);
+      setTimeout(loadPcStatus, 12000);
+    } else {
+      showToast('关机失败: ' + (d.error || '未知错误'));
+    }
+  } catch (e) {
+    showToast('关机请求失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    pulse.style.display = 'none';
+    btn.childNodes[btn.childNodes.length - 1].textContent = origText;
+  }
+}
+
+function togglePcHelp() {
+  const help = document.getElementById('pcHelp');
+  if (help) help.classList.toggle('collapsed');
+}
+
+function startPcPolling() {
+  if (_pcPollTimer) return;
+  loadPcStatus();
+  _pcPollTimer = setInterval(loadPcStatus, PC_POLL_MS);
+}
+function stopPcPolling() {
+  if (_pcPollTimer) { clearInterval(_pcPollTimer); _pcPollTimer = null; }
+}
+
+// Auto-start polling when PC section is visible
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') startPcPolling();
+  else stopPcPolling();
+});
 
 // ── Speedtest ──
 
@@ -5230,6 +6873,7 @@ async function saveSubUrl() {
 
 async function refreshSub() {
   const url = document.getElementById('gwSubInput').value.trim();
+  if (!url) { showToast('请填写订阅链接'); return; }
   if (!confirm('将 fetch 订阅 → 覆盖 mihomo 配置 → 重启服务。继续？')) return;
   const btn = document.getElementById('btnRefreshSub');
   btn.disabled = true; btn.textContent = '更新中…';
@@ -5244,7 +6888,13 @@ async function refreshSub() {
       showToast('订阅已更新: ' + d.proxy_count + ' 节点');
       setTimeout(loadAllGw, 2000);
     } else {
-      showToast('更新失败: ' + (d.error || ''));
+      const err = d.error || '';
+      // If TLS/network error, nudge user toward manual paste
+      if (/ssl|tls|eof|handshake|certificate|connect/i.test(err)) {
+        showToast('⚠️ 自动拉取失败 (TLS/网络问题)，请切换到「手动粘贴配置」');
+      } else {
+        showToast('更新失败: ' + err);
+      }
     }
   } catch (e) { showToast('更新失败: ' + e.message); }
   btn.disabled = false; btn.textContent = '更新订阅';
@@ -5260,6 +6910,53 @@ async function restartMihomo() {
       setTimeout(loadAllGw, 3000);
     } else showToast('重启失败: ' + (d.error || ''));
   } catch (e) { showToast('重启失败'); }
+}
+
+// ── Subscription mode switcher (URL vs manual YAML paste) ──
+function switchSubMode(mode) {
+  document.getElementById('tabSubUrl').classList.toggle('on', mode === 'url');
+  document.getElementById('tabSubYaml').classList.toggle('on', mode === 'yaml');
+  document.getElementById('subPaneUrl').style.display = mode === 'url' ? 'block' : 'none';
+  document.getElementById('subPaneYaml').style.display = mode === 'yaml' ? 'block' : 'none';
+  const hint = document.getElementById('gwSubHint');
+  if (hint) {
+    hint.textContent = mode === 'url'
+      ? '订阅更新会拉取链接、覆盖 /etc/mihomo/config.yaml 的 proxies/proxy-groups/rules，并重启服务（自动备份原文件）'
+      : '手动粘贴会跳过 URL 拉取，直接将 YAML 内容写入配置并重启 mihomo。适用于自动拉取失败（如 TLS 握手错误）的兜底场景。';
+  }
+}
+
+function clearSubYaml() {
+  document.getElementById('gwYamlInput').value = '';
+}
+
+async function uploadSubYaml() {
+  const yaml = document.getElementById('gwYamlInput').value.trim();
+  if (!yaml) { showToast('请粘贴 YAML 配置内容'); return; }
+  if (!yaml.includes('proxies:')) {
+    if (!confirm('粘贴的内容中未检测到 "proxies:" 字段，可能不是有效的 Clash 配置。继续？')) return;
+  }
+  const btn = document.getElementById('btnUploadYaml');
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = '应用中…';
+  try {
+    const r = await fetch('/api/mihomo/sub/upload-yaml', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ yaml })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      showToast('配置已应用: ' + d.proxy_count + ' 节点 · mihomo 重启中');
+      document.getElementById('gwYamlInput').value = '';
+      setTimeout(loadAllGw, 3000);
+    } else {
+      showToast('应用失败: ' + (d.error || ''));
+    }
+  } catch (e) { showToast('应用失败: ' + e.message); }
+  btn.disabled = false;
+  btn.textContent = origText;
 }
 
 async function loadRecent() {
@@ -5553,11 +7250,24 @@ let _monSortKey = 'cpu';
 let _monSortDesc = true;
 let _monLoading = false;
 
+function fmtRuntime(sec) {
+  if (sec == null || sec < 0) return '--';
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60);
+  if (m < 60) return m + 'm';
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 24) return h + 'h ' + rm + 'm';
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return d + 'd ' + rh + 'h';
+}
+
 function renderMonTable(list) {
   const tbody = document.getElementById('monTbody');
   if (!tbody) return;
   if (!list || list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="mon-empty">无匹配进程</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="mon-empty">无匹配进程</td></tr>';
     return;
   }
   const html = list.map(p => {
@@ -5571,12 +7281,14 @@ function renderMonTable(list) {
     const name = escHtml(p.name || '');
     const cpu = p.cpu_percent != null ? p.cpu_percent.toFixed(1) + '%' : '--';
     const mem = fmtBytes(p.mem_bytes);
+    const runtime = fmtRuntime(p.runtime_seconds);
     const canKill = p.pid > 1 && !p.is_daemon;
     return `<tr>
       <td class="col-pid">${p.pid}</td>
       <td class="col-name" title="${name}">${name}${svc}</td>
       <td class="col-cpu">${cpu}</td>
       <td class="col-mem">${mem}</td>
+      <td class="col-runtime" title="${p.runtime_seconds != null ? p.runtime_seconds + ' 秒' : ''}">${runtime}</td>
       <td class="col-cmd" title="${cmd}">${cmd || '-'}</td>
       <td class="col-daemon">${daemonBadge}</td>
       <td class="col-act">
@@ -5604,7 +7316,7 @@ async function loadMonProcesses() {
     applyMonSortAndFilter();
   } catch (e) {
     const tbody = document.getElementById('monTbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="mon-empty" style="color:var(--danger)">加载失败: ${escHtml(e.message)}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="mon-empty" style="color:var(--danger)">加载失败: ${escHtml(e.message)}</td></tr>`;
   } finally {
     _monLoading = false;
     if (pulse) pulse.style.display = 'none';
@@ -5631,6 +7343,7 @@ function applyMonSortAndFilter() {
       case 'name': av = (a.name || '').toLowerCase(); bv = (b.name || '').toLowerCase(); break;
       case 'cpu': av = a.cpu_percent != null ? a.cpu_percent : -1; bv = b.cpu_percent != null ? b.cpu_percent : -1; break;
       case 'mem': av = a.mem_bytes || 0; bv = b.mem_bytes || 0; break;
+      case 'runtime': av = a.runtime_seconds != null ? a.runtime_seconds : -1; bv = b.runtime_seconds != null ? b.runtime_seconds : -1; break;
       default: av = a.pid; bv = b.pid;
     }
     if (av < bv) return _monSortDesc ? 1 : -1;
@@ -5642,7 +7355,7 @@ function applyMonSortAndFilter() {
   document.querySelectorAll('.mon-table th').forEach(th => {
     th.classList.remove('sort-asc', 'sort-desc');
   });
-  const map = { pid: 0, name: 1, cpu: 2, mem: 3 };
+  const map = { pid: 0, name: 1, cpu: 2, mem: 3, runtime: 4 };
   const idx = map[_monSortKey];
   if (idx != null) {
     const th = document.querySelectorAll('.mon-table th')[idx];
@@ -5795,6 +7508,39 @@ function selectPhotoMode(m) {
     canvas.style.pointerEvents = 'none';
     if (hint) hint.textContent = '';
   }
+}
+
+// ── Daily News ──
+async function loadDailyNews() {
+  const list = document.getElementById('newsList');
+  if (!list) return;
+  try {
+    const r = await fetch('/api/daily-news');
+    const data = await r.json();
+    if (!data.items || data.items.length === 0) {
+      list.innerHTML = '<div class="mon-empty">暂无每日摘要</div>';
+      return;
+    }
+    list.innerHTML = data.items.map(item => {
+      const date = item.date;
+      return `<div class="news-item">
+        <div class="news-info">
+          <div class="news-title">${item.title}</div>
+          <div class="news-meta">${date} · ${item.category || '综合'}</div>
+        </div>
+        <div class="news-actions">
+          <button class="btn btn-mini" onclick="viewDailyNews('${item.filename}')">查看</button>
+          <a class="btn btn-mini" href="/api/daily-news/download/${item.filename}" download>下载</a>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="mon-empty">加载失败</div>';
+  }
+}
+
+function viewDailyNews(filename) {
+  window.open('/api/daily-news/view/' + filename, '_blank');
 }
 
 function setupPhotoUpload() {
@@ -6108,8 +7854,12 @@ function resetPhoto() {
 
 loadPhotoProviders();
 setupPhotoUpload();
+loadDailyNews();
 
-if (document.visibilityState === 'visible') startSysPolling();
+if (document.visibilityState === 'visible') {
+  startSysPolling();
+  startPcPolling();
+}
 </script>
 </body>
 </html>"""
