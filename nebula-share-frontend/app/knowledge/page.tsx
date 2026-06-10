@@ -218,7 +218,7 @@ export default function KnowledgePage() {
 
   if (loading) {
     return (
-      <div className="h-[calc(100vh-120px)] flex items-center justify-center">
+      <div className="p-6 sm:p-8 max-w-6xl mx-auto h-full flex items-center justify-center">
         <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
       </div>
     )
@@ -226,95 +226,105 @@ export default function KnowledgePage() {
 
   if (!data || !data.nodes.length) {
     return (
-      <div className="h-[calc(100vh-120px)] flex items-center justify-center">
+      <div className="p-6 sm:p-8 max-w-6xl mx-auto h-full flex items-center justify-center">
         <p className="text-sm text-muted-foreground">暂无知识图谱数据</p>
       </div>
     )
   }
 
   return (
-    <div className="h-[calc(100vh-120px)] p-6 flex flex-col">
-      {/* Header with upload */}
-      <div className="flex items-center justify-between mb-3 shrink-0">
-        <div>
-          <h2 className="text-lg font-semibold tracking-tight">知识图谱</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            {data.nodes.length} 节点 · {data.edges.length} 关系
-            {uploadState.status === "done" && (
-              <span className="ml-2 text-chart-1">· 来自 {uploadState.fileName}</span>
+    <div className="p-6 sm:p-8 max-w-6xl mx-auto h-full flex flex-col">
+      {/* Page Header */}
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold tracking-tight">☁️ Cloud历史知识图谱</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          Claude Code 会话历史 · 概念关联 · 决策追踪 · 会话溯源
+        </p>
+      </div>
+
+      <div className="flex-1 bg-card rounded-2xl p-5 sm:p-6 shadow-[var(--shadow-card)] border border-border/40 flex flex-col min-h-[500px]">
+        {/* Header with upload */}
+        <div className="flex items-center justify-between mb-3 shrink-0">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight">知识图谱</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {data.nodes.length} 节点 · {data.edges.length} 关系
+              {uploadState.status === "done" && (
+                <span className="ml-2 text-chart-1">· 来自 {uploadState.fileName}</span>
+              )}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Upload status indicators */}
+            {uploadState.status === "parsing" && (
+              <span className="text-xs text-muted-foreground flex items-center gap-1">
+                <div className="w-3 h-3 border border-primary/30 border-t-primary rounded-full animate-spin" />
+                解析 {uploadState.fileName}...
+              </span>
             )}
-          </p>
-        </div>
+            {uploadState.status === "done" && (
+              <span className="text-xs text-chart-1 flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                已加载
+              </span>
+            )}
+            {uploadState.status === "error" && (
+              <span className="text-xs text-chart-2 flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5" />
+                {uploadState.message}
+              </span>
+            )}
 
-        <div className="flex items-center gap-2">
-          {/* Upload status indicators */}
-          {uploadState.status === "parsing" && (
-            <span className="text-xs text-muted-foreground flex items-center gap-1">
-              <div className="w-3 h-3 border border-primary/30 border-t-primary rounded-full animate-spin" />
-              解析 {uploadState.fileName}...
-            </span>
-          )}
-          {uploadState.status === "done" && (
-            <span className="text-xs text-chart-1 flex items-center gap-1">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              已加载
-            </span>
-          )}
-          {uploadState.status === "error" && (
-            <span className="text-xs text-chart-2 flex items-center gap-1">
-              <AlertCircle className="w-3.5 h-3.5" />
-              {uploadState.message}
-            </span>
-          )}
-
-          {/* Upload button */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json"
-            className="hidden"
-            onChange={handleFileSelect}
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs font-medium hover:bg-primary/15 transition-colors"
-          >
-            <Upload className="w-3.5 h-3.5" strokeWidth={1.5} />
-            加载 graph.json
-          </button>
-          {uploadState.status === "done" && (
+            {/* Upload button */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              className="hidden"
+              onChange={handleFileSelect}
+            />
             <button
-              onClick={clearUpload}
-              className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-secondary/60 text-muted-foreground text-xs hover:text-foreground transition-colors"
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs font-medium hover:bg-primary/15 transition-colors"
             >
-              <X className="w-3 h-3" strokeWidth={1.5} />
-              重置
+              <Upload className="w-3.5 h-3.5" strokeWidth={1.5} />
+              加载 graph.json
             </button>
-          )}
+            {uploadState.status === "done" && (
+              <button
+                onClick={clearUpload}
+                className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-secondary/60 text-muted-foreground text-xs hover:text-foreground transition-colors"
+              >
+                <X className="w-3 h-3" strokeWidth={1.5} />
+                重置
+              </button>
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* Drop zone */}
-      <div
-        className={cn(
-          "flex-1 rounded-xl border border-border/40 overflow-hidden transition-colors",
-          dragOver && "border-primary/50 bg-primary/5"
-        )}
-        onDragOver={(e) => {
-          e.preventDefault()
-          setDragOver(true)
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={handleDrop}
-      >
-        <KnowledgeGraph data={data} />
-      </div>
+        {/* Drop zone */}
+        <div
+          className={cn(
+            "flex-1 rounded-xl border border-border/40 overflow-hidden transition-colors min-h-0",
+            dragOver && "border-primary/50 bg-primary/5"
+          )}
+          onDragOver={(e) => {
+            e.preventDefault()
+            setDragOver(true)
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+        >
+          <KnowledgeGraph data={data} />
+        </div>
 
-      {/* Hint */}
-      <p className="text-[10px] text-muted-foreground/60 mt-2 text-center">
-        <FileJson className="w-3 h-3 inline mr-1" strokeWidth={1.5} />
-        拖拽 graph.json 到上方区域，或点击按钮选择文件
-      </p>
+        {/* Hint */}
+        <p className="text-[10px] text-muted-foreground/60 mt-2 text-center shrink-0">
+          <FileJson className="w-3 h-3 inline mr-1" strokeWidth={1.5} />
+          拖拽 graph.json 到上方区域，或点击按钮选择文件
+        </p>
+      </div>
     </div>
   )
 }

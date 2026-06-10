@@ -9,9 +9,11 @@ import { cn } from "@/lib/utils"
 export interface Node {
   id: string
   name?: string
-  type: "Project" | "Technology" | "Decision" | "Problem" | "Concept" | "Session"
+  label?: string
+  type: string
   group: number
   radius?: number
+  description?: string
   // D3 simulation will add these:
   x?: number
   y?: number
@@ -34,10 +36,13 @@ export interface GraphData {
 
 interface KnowledgeGraphProps {
   data: GraphData
+  nodeColors?: Record<string, string>
+  nodeIcons?: Record<string, React.ReactNode>
+  title?: string
 }
 
-// ─── Constants ──────────────────────────────────────────────────────
-const NODE_COLORS: Record<Node["type"], string> = {
+// ─── Default Constants ──────────────────────────────────────────────────────
+const DEFAULT_NODE_COLORS: Record<string, string> = {
   Project: "#3b82f6",
   Technology: "#22c55e",
   Decision: "#f97316",
@@ -46,7 +51,7 @@ const NODE_COLORS: Record<Node["type"], string> = {
   Session: "#6b7280",
 }
 
-const NODE_ICONS: Record<Node["type"], React.ReactNode> = {
+const DEFAULT_NODE_ICONS: Record<string, React.ReactNode> = {
   Project: <Box className="w-3.5 h-3.5" strokeWidth={1.5} />,
   Technology: <Layers className="w-3.5 h-3.5" strokeWidth={1.5} />,
   Decision: <Lightbulb className="w-3.5 h-3.5" strokeWidth={1.5} />,
@@ -55,12 +60,31 @@ const NODE_ICONS: Record<Node["type"], React.ReactNode> = {
   Session: <MessageSquare className="w-3.5 h-3.5" strokeWidth={1.5} />,
 }
 
+// SDK Graph Node Colors
+export const SDK_NODE_COLORS: Record<string, string> = {
+  FaultCode: "#ef4444",
+  Command: "#3b82f6",
+  Protocol: "#22c55e",
+  DataField: "#f59e0b",
+  DataStruct: "#8b5cf6",
+  BMSData: "#ec4899",
+  GunData: "#06b6d4",
+  EnumType: "#10b981",
+  State: "#f97316",
+  Module: "#6b7280",
+  EventType: "#a855f7",
+  EnumValue: "#64748b",
+  InteractionFlow: "#0ea5e9",
+}
+
 const FORCE_CHARGE = -300
 const FORCE_LINK_DISTANCE = 100
 const FORCE_COLLIDE = 30
 
 // ─── Component ──────────────────────────────────────────────────────
-export function KnowledgeGraph({ data }: KnowledgeGraphProps) {
+export function KnowledgeGraph({ data, nodeColors, nodeIcons, title }: KnowledgeGraphProps) {
+  const NODE_COLORS = nodeColors || DEFAULT_NODE_COLORS
+  const NODE_ICONS = nodeIcons || DEFAULT_NODE_ICONS
   const svgRef = useRef<SVGSVGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const simulationRef = useRef<d3.Simulation<Node, undefined> | null>(null)

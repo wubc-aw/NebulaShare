@@ -3000,6 +3000,78 @@ def knowledge_search():
     return jsonify({"ok": True, "results": results[:30], "total": len(results)})
 
 
+# ── SDK Knowledge Graph API ─────────────────────────────────────────
+_SDK_GRAPH_FILE = "/home/aw/vibeProjects/claude-history/charge-pile-graph/graph.json"
+
+
+@app.route("/api/knowledge/sdk-graph")
+def knowledge_sdk_graph():
+    """返回充电桩 SDK 4.0 知识图谱数据"""
+    data = _load_json_safe(_SDK_GRAPH_FILE, {"nodes": [], "edges": []})
+    return jsonify({
+        "ok": True,
+        "meta": data.get("metadata", {}),
+        "nodes": data.get("nodes", []),
+        "edges": data.get("edges", []),
+    })
+
+
+# ── MCP Tools API ───────────────────────────────────────────────────
+_MCP_SERVER_PATH = "/home/aw/vibeProjects/claude-history/charge-pile-graph/mcp_server.py"
+
+
+@app.route("/api/mcp/<tool>")
+def mcp_tool(tool):
+    """执行 MCP 工具查询
+
+    支持的工具:
+        list_fault_codes, search_fault_codes, find_interface,
+        query_protocol, trace_call_path, what_do_i_need,
+        get_state_machine, list_modules, get_protocol_flow
+    """
+    import subprocess
+
+    valid_tools = {
+        "list_fault_codes", "search_fault_codes", "find_interface",
+        "query_protocol", "trace_call_path", "what_do_i_need",
+        "get_state_machine", "list_modules", "get_protocol_flow",
+    }
+
+    if tool not in valid_tools:
+        return jsonify({"ok": False, "error": f"未知工具: {tool}"}), 400
+
+    # Build command arguments from query params
+    args = []
+    for key, value in request.args.items():
+        if value:
+            args.append(value)
+
+    cmd = [sys.executable, _MCP_SERVER_PATH, tool] + args
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd="/home/aw/vibeProjects/claude-history/charge-pile-graph",
+        )
+        if result.returncode != 0:
+            return jsonify({"ok": False, "error": result.stderr or "执行失败"}), 500
+
+        # Parse JSON output from mcp_server.py
+        output = result.stdout.strip()
+        # mcp_server.py prints JSON to stdout
+        data = json.loads(output)
+        return jsonify({"ok": True, "tool": tool, "data": data})
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "查询超时"}), 504
+    except json.JSONDecodeError:
+        return jsonify({"ok": False, "error": "解析结果失败", "raw": output}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ── Static Frontend (Next.js export) ────────────────────────────────
 STATIC_DIR = "/home/aw/vibeProjects/NebulaShare/static"
 
@@ -3011,11 +3083,21 @@ def static_catchall(filename):
     if filename.startswith("api/"):
         return jsonify({"error": "not found"}), 404
 
+    # 1. Direct file match
     target = safe_join(STATIC_DIR, filename)
     if target and os.path.isfile(target):
         return send_from_directory(STATIC_DIR, filename)
 
-    # SPA fallback: serve index.html for unknown paths (client-side routing)
+    # 2. Subdirectory index.html (e.g. /files/ -> static/files/index.html)
+    if filename.endswith("/"):
+        index_file = filename + "index.html"
+    else:
+        index_file = filename + "/index.html"
+    target_index = safe_join(STATIC_DIR, index_file)
+    if target_index and os.path.isfile(target_index):
+        return send_from_directory(STATIC_DIR, index_file)
+
+    # 3. SPA fallback: serve root index.html for unknown paths (client-side routing)
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.isfile(index_path):
         return send_from_directory(STATIC_DIR, "index.html")
@@ -3031,7 +3113,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nebula · AW — 家中网络的管家与中枢</title>
+<title>Nebula</title>
 <style>
 :root {
   --bg0: #050810;
