@@ -8,6 +8,7 @@ import { ArticleReader } from "@/components/intel/article-reader"
 import { SyncButton } from "@/components/intel/sync-button"
 import { ArticleForm } from "@/components/intel/article-form"
 import { TagSelector } from "@/components/intel/tag-selector"
+import { StatsPanel } from "@/components/intel/stats-panel"
 import type { Article } from "@/components/intel/article-list-item"
 
 const API_BASE = "/api/intel"
@@ -124,6 +125,9 @@ export default function IntelPage() {
           <SyncButton onSync={handleSync} />
         </div>
       </div>
+
+      {/* Stats panel */}
+      <StatsPanel />
 
       {/* Main card */}
       <div className="flex-1 flex flex-col min-h-0 bg-card rounded-2xl shadow-[var(--shadow-card)] border border-border/40 overflow-hidden">
