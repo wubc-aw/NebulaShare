@@ -24,6 +24,7 @@ import yaml
 import requests
 import intel_db
 import intel_sync
+from flask_apscheduler import APScheduler
 
 # ── Config ──────────────────────────────────────────────────────────
 UPLOAD_DIR = os.environ.get("NEBULA_DIR", "/home/aw/vibeProjects/NebulaShare/uploads")
@@ -54,6 +55,29 @@ os.makedirs(NEBULA_STATE_DIR, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+scheduler = APScheduler()
+scheduler.init_app(app)
+
+@scheduler.task('interval', id='sync_hermes', minutes=10)
+def scheduled_hermes_sync():
+    with app.app_context():
+        try:
+            result = intel_sync.sync_hermes()
+            print(f"[scheduler] Hermes sync: {result}")
+        except Exception as e:
+            print(f"[scheduler] Hermes sync failed: {e}")
+
+@scheduler.task('interval', id='sync_rss', minutes=30)
+def scheduled_rss_sync():
+    with app.app_context():
+        try:
+            result = intel_sync.sync_all_rss()
+            print(f"[scheduler] RSS sync: {result}")
+        except Exception as e:
+            print(f"[scheduler] RSS sync failed: {e}")
+
+scheduler.start()
 
 # ── Intelligence Center ──────────────────────────────────────────────
 intel_db.init_db()
