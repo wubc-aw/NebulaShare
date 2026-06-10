@@ -147,7 +147,7 @@ export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps
             />
           ) : (
             <div className="p-6 rounded-xl bg-secondary/40 text-center">
-              <p className="text-sm text-muted-foreground">完整内容加载中...</p>
+              <p className="text-sm text-muted-foreground">暂无全文内容 · 点击「原文」阅读完整文章</p>
             </div>
           )}
         </div>
