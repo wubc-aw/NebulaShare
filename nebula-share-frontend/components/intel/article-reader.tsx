@@ -11,7 +11,8 @@ import {
   BookOpen,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import type { Article } from "./article-list-item"
+import type { Article, TagItem } from "./article-list-item"
+import { TagSelector } from "./tag-selector"
 
 const categoryDotColor: Record<string, string> = {
   AI: "bg-chart-1",
@@ -117,10 +118,10 @@ export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps
             <div className="flex items-center gap-1.5 mb-5 flex-wrap">
               {article.tags.map((tag) => (
                 <span
-                  key={tag}
+                  key={tag.id}
                   className="px-2 py-0.5 rounded-md bg-secondary text-xs text-muted-foreground font-medium"
                 >
-                  {tag}
+                  {tag.name}
                 </span>
               ))}
             </div>
@@ -205,6 +206,12 @@ export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps
               <Archive className="w-3.5 h-3.5" strokeWidth={1.5} />
               {article.is_archived ? "已归档" : "归档"}
             </button>
+
+            <TagSelector
+              articleId={article.id}
+              selectedTags={article.tags}
+              onChange={(tags: TagItem[]) => onUpdate(article.id, { tags })}
+            />
           </div>
 
           {article.url && (

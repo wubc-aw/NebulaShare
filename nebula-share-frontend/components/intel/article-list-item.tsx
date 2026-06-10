@@ -3,14 +3,20 @@
 import { Star } from "lucide-react"
 import { cn } from "@/lib/utils"
 
+export interface TagItem {
+  id: number
+  name: string
+  color: string
+}
+
 export interface Article {
-  id: string
+  id: number
   title: string
   summary: string
   content?: string
   source: string
   category: string
-  tags: string[]
+  tags: TagItem[]
   author?: string
   date: string
   url?: string
@@ -74,10 +80,10 @@ export function ArticleListItem({ article, selected, onClick, onToggleStar }: Ar
             </span>
             {article.tags.map((tag) => (
               <span
-                key={tag}
+                key={tag.id}
                 className="px-1.5 py-0.5 rounded-md bg-secondary/80 text-[10px] text-muted-foreground font-medium"
               >
-                {tag}
+                {tag.name}
               </span>
             ))}
           </div>

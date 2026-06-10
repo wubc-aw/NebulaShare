@@ -1,11 +1,13 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { Loader2, BookOpen } from "lucide-react"
+import { Loader2, BookOpen, Plus, Tag } from "lucide-react"
 import { SearchBar } from "@/components/intel/search-bar"
 import { ArticleList } from "@/components/intel/article-list"
 import { ArticleReader } from "@/components/intel/article-reader"
 import { SyncButton } from "@/components/intel/sync-button"
+import { ArticleForm } from "@/components/intel/article-form"
+import { TagSelector } from "@/components/intel/tag-selector"
 import type { Article } from "@/components/intel/article-list-item"
 
 const API_BASE = "/api/intel"
@@ -23,6 +25,9 @@ export default function IntelPage() {
 
   // Selection
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null)
+
+  // Form modal
+  const [showForm, setShowForm] = useState(false)
 
   // Fetch articles
   const fetchArticles = useCallback(async () => {
@@ -108,7 +113,16 @@ export default function IntelPage() {
             {articles.length} 篇文章 · {unreadCount} 篇未读
           </p>
         </div>
-        <SyncButton onSync={handleSync} />
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowForm(true)}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium bg-chart-4/10 text-chart-4 hover:bg-chart-4/15 transition-colors"
+          >
+            <Plus className="w-4 h-4" strokeWidth={1.5} />
+            新建
+          </button>
+          <SyncButton onSync={handleSync} />
+        </div>
       </div>
 
       {/* Main card */}
@@ -157,6 +171,14 @@ export default function IntelPage() {
           />
         </div>
       </div>
+
+      {/* ArticleForm modal */}
+      {showForm && (
+        <ArticleForm
+          onClose={() => setShowForm(false)}
+          onCreated={() => { setShowForm(false); fetchArticles() }}
+        />
+      )}
     </div>
   )
 }
