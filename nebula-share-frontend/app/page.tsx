@@ -176,11 +176,16 @@ export default function DashboardPage() {
           setHistoryMeta(d.meta)
           setHistorySessions(d.sessions?.slice(0, 3) || [])
         }),
-      fetch("/api/daily-news")
+      fetch("/api/intel/articles?unread=1&per_page=1")
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (!mounted || !d?.items?.length) return
-          setNews(d.items[0])
+          if (!mounted || !d?.articles?.length) return
+          const a = d.articles[0]
+          setNews({
+            title: a.title,
+            date: a.published_at?.split("T")[0] || "",
+            category: a.category,
+          })
         }),
       fetch("/api/knowledge/graph")
         .then((r) => (r.ok ? r.json() : null))
