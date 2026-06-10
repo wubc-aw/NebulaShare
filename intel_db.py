@@ -69,6 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_articles_category  ON articles(category);
 CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at);
 CREATE INDEX IF NOT EXISTS idx_articles_starred   ON articles(is_starred) WHERE is_starred = 1;
 CREATE INDEX IF NOT EXISTS idx_articles_archived  ON articles(is_archived) WHERE is_archived = 0;
+CREATE INDEX IF NOT EXISTS idx_tags_name         ON tags(name);
 """
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -149,9 +150,10 @@ def list_sources():
     with _conn() as conn:
         rows = conn.execute(
             """
-            SELECT s.*,
-                   (SELECT COUNT(*) FROM articles WHERE source_id = s.id) AS article_count
+            SELECT s.*, COUNT(a.id) AS article_count
             FROM sources s
+            LEFT JOIN articles a ON a.source_id = s.id
+            GROUP BY s.id
             ORDER BY s.id
             """
         ).fetchall()
@@ -183,17 +185,27 @@ def create_source(name, type_, url=None, config=None, is_active=1):
 
 def update_source(source_id, **fields):
     """Update arbitrary fields on a source."""
-    allowed = {"name", "type", "url", "config", "is_active",
-               "last_fetch_at", "last_error", "error_count"}
-    updates = {k: v for k, v in fields.items() if k in allowed}
+    allowed_map = {
+        "name": "name",
+        "url": "url",
+        "config": "config",
+        "is_active": "is_active",
+        "category": "category",
+        "last_fetch_at": "last_fetch_at",
+        "last_error": "last_error",
+        "error_count": "error_count",
+    }
+    updates = {allowed_map[k]: v for k, v in fields.items() if k in allowed_map}
     if not updates:
-        return
+        return get_source(source_id)
     if "config" in updates and updates["config"] is not None:
         updates["config"] = json.dumps(updates["config"], ensure_ascii=False)
-    cols = ", ".join(f"{k} = ?" for k in updates)
-    values = list(updates.values()) + [source_id]
+    sets = ", ".join(f"{col} = ?" for col in updates)
+    vals = list(updates.values()) + [source_id]
     with _conn() as conn:
-        conn.execute(f"UPDATE sources SET {cols} WHERE id = ?", values)
+        conn.execute(f"UPDATE sources SET {sets} WHERE id = ?", vals)
+        row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+        return _row_to_dict(row)
 
 
 def delete_source(source_id):
@@ -286,7 +298,11 @@ def get_article(article_id):
         if not row:
             return None
         article = _row_to_dict(row)
-        article["tags"] = get_article_tags(article_id)
+        tag_rows = conn.execute(
+            "SELECT t.* FROM tags t JOIN article_tags at ON at.tag_id = t.id WHERE at.article_id = ?",
+            (article_id,),
+        ).fetchall()
+        article["tags"] = [_row_to_dict(r) for r in tag_rows]
         return article
 
 
@@ -328,17 +344,43 @@ def create_article(
 
 def update_article(article_id, **fields):
     """Update arbitrary fields on an article."""
-    allowed = {
-        "title", "summary", "content", "url", "author",
-        "published_at", "category", "is_read", "is_starred", "is_archived",
+    allowed_map = {
+        "title": "title",
+        "summary": "summary",
+        "content": "content",
+        "url": "url",
+        "author": "author",
+        "published_at": "published_at",
+        "category": "category",
+        "is_read": "is_read",
+        "is_starred": "is_starred",
+        "is_archived": "is_archived",
     }
-    updates = {k: v for k, v in fields.items() if k in allowed}
+    updates = {allowed_map[k]: v for k, v in fields.items() if k in allowed_map}
     if not updates:
-        return
-    cols = ", ".join(f"{k} = ?" for k in updates)
-    values = list(updates.values()) + [article_id]
+        return get_article(article_id)
+    sets = ", ".join(f"{col} = ?" for col in updates)
+    vals = list(updates.values()) + [article_id]
     with _conn() as conn:
-        conn.execute(f"UPDATE articles SET {cols} WHERE id = ?", values)
+        conn.execute(f"UPDATE articles SET {sets} WHERE id = ?", vals)
+        row = conn.execute(
+            """
+            SELECT a.*, s.name AS source_name
+            FROM articles a
+            JOIN sources s ON a.source_id = s.id
+            WHERE a.id = ?
+            """,
+            (article_id,),
+        ).fetchone()
+        if not row:
+            return None
+        article = _row_to_dict(row)
+        tag_rows = conn.execute(
+            "SELECT t.* FROM tags t JOIN article_tags at ON at.tag_id = t.id WHERE at.article_id = ?",
+            (article_id,),
+        ).fetchall()
+        article["tags"] = [_row_to_dict(r) for r in tag_rows]
+        return article
 
 
 def delete_article(article_id):
@@ -364,9 +406,10 @@ def list_tags():
     with _conn() as conn:
         rows = conn.execute(
             """
-            SELECT t.*,
-                   (SELECT COUNT(*) FROM article_tags WHERE tag_id = t.id) AS usage_count
+            SELECT t.*, COUNT(at.article_id) AS usage_count
             FROM tags t
+            LEFT JOIN article_tags at ON at.tag_id = t.id
+            GROUP BY t.id
             ORDER BY t.name
             """
         ).fetchall()
