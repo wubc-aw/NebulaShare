@@ -5,6 +5,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import json
 
 # ── Config ──────────────────────────────────────────────────────────
 
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS sources (
     last_fetch_at TEXT,
     last_error    TEXT,
     error_count   INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT    NOT NULL
+    created_at    TEXT    DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Articles: the raw signal
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS articles (
     is_read     INTEGER NOT NULL DEFAULT 0,   -- 0 or 1
     is_starred  INTEGER NOT NULL DEFAULT 0,   -- 0 or 1
     is_archived INTEGER NOT NULL DEFAULT 0,   -- 0 or 1
-    fetched_at  TEXT    NOT NULL,
+    fetched_at  TEXT    DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
 );
 
@@ -67,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_articles_source    ON articles(source_id);
 CREATE INDEX IF NOT EXISTS idx_articles_category  ON articles(category);
 CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at);
 CREATE INDEX IF NOT EXISTS idx_articles_starred   ON articles(is_starred) WHERE is_starred = 1;
-CREATE INDEX IF NOT EXISTS idx_articles_archived  ON articles(is_archived) WHERE is_archived = 1;
+CREATE INDEX IF NOT EXISTS idx_articles_archived  ON articles(is_archived) WHERE is_archived = 0;
 """
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -210,6 +211,7 @@ def list_articles(
     unread=None,
     archived=None,
     source_id=None,
+    tag=None,
     page=1,
     per_page=20,
 ):
@@ -238,6 +240,11 @@ def list_articles(
     if source_id is not None:
         where_clauses.append("a.source_id = ?")
         params.append(source_id)
+    if tag is not None:
+        where_clauses.append(
+            "a.id IN (SELECT article_id FROM article_tags at JOIN tags t ON t.id = at.tag_id WHERE t.name = ?)"
+        )
+        params.append(tag)
 
     where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
@@ -483,5 +490,3 @@ def get_stats():
     }
 
 
-# ── JSON import (for create_source config field) ───────────────────
-import json  # noqa: E402
