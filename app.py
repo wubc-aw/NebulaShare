@@ -22,6 +22,8 @@ from werkzeug.utils import safe_join
 import qrcode
 import yaml
 import requests
+import intel_db
+import intel_sync
 
 # ── Config ──────────────────────────────────────────────────────────
 UPLOAD_DIR = os.environ.get("NEBULA_DIR", "/home/aw/vibeProjects/NebulaShare/uploads")
@@ -52,6 +54,9 @@ os.makedirs(NEBULA_STATE_DIR, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# ── Intelligence Center ──────────────────────────────────────────────
+intel_db.init_db()
 
 # ── Utils ───────────────────────────────────────────────────────────
 
@@ -1176,6 +1181,185 @@ def mihomo_stop():
     if r.returncode != 0:
         return jsonify({"ok": False, "error": r.stderr.strip()}), 500
     return jsonify({"ok": True})
+
+
+# ── Routes: Intelligence Center ─────────────────────────────────────
+
+@app.route("/api/intel/articles")
+def intel_articles_list():
+    """List articles with filtering, search, and pagination."""
+    category = request.args.get("category") or None
+    tag = request.args.get("tag") or None
+    search_q = request.args.get("search") or None
+    starred = request.args.get("starred")
+    unread = request.args.get("unread")
+    archived = request.args.get("archived", "0") == "1"
+    source_id = request.args.get("source_id", type=int)
+    page = request.args.get("page", 1, type=int)
+    per_page = min(request.args.get("per_page", 20, type=int), 100)
+
+    articles, total = intel_db.list_articles(
+        category=category, tag=tag, search=search_q,
+        starred=(starred == "1") if starred is not None else None,
+        unread=(unread == "1") if unread is not None else None,
+        archived=archived, source_id=source_id,
+        page=page, per_page=per_page
+    )
+    return jsonify({"articles": articles, "total": total, "page": page, "per_page": per_page})
+
+
+@app.route("/api/intel/articles", methods=["POST"])
+def intel_article_create():
+    """Create a new article (manual entry)."""
+    data = request.get_json() or {}
+    title = data.get("title", "").strip()
+    if not title:
+        return jsonify({"error": "title is required"}), 400
+
+    art = intel_db.create_article(
+        source_id=data.get("source_id", 2),  # default to manual
+        title=title,
+        summary=data.get("summary", ""),
+        content=data.get("content", ""),
+        url=data.get("url", ""),
+        author=data.get("author", ""),
+        published_at=data.get("published_at"),
+        category=data.get("category", "阅读"),
+    )
+
+    tag_ids = data.get("tags", [])
+    if tag_ids:
+        intel_db.set_article_tags(art["id"], tag_ids)
+        art = intel_db.get_article(art["id"])
+
+    return jsonify(art)
+
+
+@app.route("/api/intel/articles/<int:article_id>")
+def intel_article_get(article_id):
+    art = intel_db.get_article(article_id)
+    if not art:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(art)
+
+
+@app.route("/api/intel/articles/<int:article_id>", methods=["PUT"])
+def intel_article_update(article_id):
+    data = request.get_json() or {}
+    fields = {k: v for k, v in data.items()
+              if k in {"title", "summary", "content", "url", "author",
+                       "category", "is_read", "is_starred", "is_archived"}}
+    art = intel_db.update_article(article_id, **fields)
+    if not art:
+        return jsonify({"error": "not found"}), 404
+
+    if "tags" in data:
+        intel_db.set_article_tags(article_id, data["tags"])
+        art = intel_db.get_article(article_id)
+
+    return jsonify(art)
+
+
+@app.route("/api/intel/articles/<int:article_id>", methods=["DELETE"])
+def intel_article_delete(article_id):
+    ok = intel_db.delete_article(article_id)
+    if not ok:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/intel/sources")
+def intel_sources_list():
+    return jsonify({"sources": intel_db.list_sources()})
+
+
+@app.route("/api/intel/sources", methods=["POST"])
+def intel_source_create():
+    data = request.get_json() or {}
+    name = data.get("name", "").strip()
+    type_ = data.get("type", "rss")
+    url = data.get("url", "").strip()
+    if not name or type_ not in {"hermes", "rss", "manual"}:
+        return jsonify({"error": "name and valid type required"}), 400
+    if type_ == "rss" and not url:
+        return jsonify({"error": "url required for rss sources"}), 400
+
+    s = intel_db.create_source(name=name, type_=type_, url=url,
+                               config=data.get("config", {}))
+    return jsonify(s)
+
+
+@app.route("/api/intel/sources/<int:source_id>", methods=["PUT"])
+def intel_source_update(source_id):
+    data = request.get_json() or {}
+    allowed = {"name", "url", "config", "is_active", "category"}
+    fields = {k: v for k, v in data.items() if k in allowed}
+    s = intel_db.update_source(source_id, **fields)
+    if not s:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(s)
+
+
+@app.route("/api/intel/sources/<int:source_id>", methods=["DELETE"])
+def intel_source_delete(source_id):
+    ok = intel_db.delete_source(source_id)
+    if not ok:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/intel/sync", methods=["POST"])
+def intel_sync_trigger():
+    data = request.get_json() or {}
+    source = data.get("source", "all")
+    results = {"hermes": {}, "rss": {}}
+
+    if source in ("all", "hermes"):
+        results["hermes"] = intel_sync.sync_hermes()
+
+    if source in ("all", "rss"):
+        results["rss"] = intel_sync.sync_all_rss()
+
+    return jsonify({"ok": True, "results": results})
+
+
+@app.route("/api/intel/tags")
+def intel_tags_list():
+    return jsonify({"tags": intel_db.list_tags()})
+
+
+@app.route("/api/intel/tags", methods=["POST"])
+def intel_tag_create():
+    data = request.get_json() or {}
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    t = intel_db.create_tag(name, data.get("color", "#3b82f6"))
+    return jsonify(t)
+
+
+@app.route("/api/intel/tags/<int:tag_id>", methods=["DELETE"])
+def intel_tag_delete(tag_id):
+    ok = intel_db.delete_tag(tag_id)
+    if not ok:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/intel/stats")
+def intel_stats():
+    return jsonify(intel_db.get_stats())
+
+
+@app.route("/api/intel/scrape", methods=["POST"])
+def intel_scrape_url():
+    """Scrape a URL for title/summary/content."""
+    data = request.get_json() or {}
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "url is required"}), 400
+    result = intel_sync.scrape_url(url)
+    return jsonify(result)
 
 
 # ── Routes: Daily News ──────────────────────────────────────────────
@@ -3001,7 +3185,7 @@ def knowledge_search():
 
 
 # ── SDK Knowledge Graph API ─────────────────────────────────────────
-_SDK_GRAPH_FILE = "/home/aw/vibeProjects/claude-history/charge-pile-graph/graph.json"
+_SDK_GRAPH_FILE = "/home/aw/vibeProjects/claude-history/charge-pile-graph/graph_refined.json"
 
 
 @app.route("/api/knowledge/sdk-graph")
