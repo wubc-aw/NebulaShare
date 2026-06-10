@@ -117,7 +117,7 @@ export default function MCPPage() {
     <div className="p-6 sm:p-8 max-w-6xl mx-auto h-full flex flex-col">
       {/* Page Header */}
       <div className="mb-6">
-        <h1 className="text-2xl font-bold tracking-tight">🛠 MCP 工具</h1>
+        <h1 className="text-2xl font-bold tracking-tight">MCP 工具</h1>
         <p className="text-sm text-muted-foreground mt-1">
           充电桩 SDK 4.0 知识图谱查询工具 · 故障码 · 接口 · 协议 · 状态机
         </p>
@@ -252,7 +252,7 @@ export default function MCPPage() {
               {/* Result */}
               {result && (
                 <div className="bg-card rounded-xl p-5 border border-border/40">
-                  <h3 className="text-sm font-semibold mb-3">📋 查询结果</h3>
+                  <h3 className="text-sm font-semibold mb-3">查询结果</h3>
                   <pre className="text-xs text-muted-foreground overflow-auto max-h-[500px] bg-secondary/50 rounded-lg p-4">
                     {JSON.stringify(result, null, 2)}
                   </pre>

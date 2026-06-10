@@ -2,7 +2,7 @@
 
 import { usePathname } from "next/navigation"
 import Link from "next/link"
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { HostStatusBar } from "@/components/host-status-bar"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { cn } from "@/lib/utils"
@@ -14,32 +14,57 @@ import {
   GitBranch,
   Home,
   Hexagon,
-  Cpu,
   Wrench,
+  ChevronDown,
 } from "lucide-react"
 
 export type Zone = "files" | "network" | "intelligence" | "history" | "knowledge" | "sdk" | "mcp"
 
-const navItems = [
-  { id: "home" as const, label: "主页", icon: Home, href: "/", shortcut: undefined },
-  { id: "files" as const, label: "文件中心", icon: FolderOpen, href: "/files", shortcut: "1" },
-  { id: "network" as const, label: "网络枢纽", icon: Network, href: "/network", shortcut: "2" },
-  { id: "intelligence" as const, label: "情报站", icon: Lightbulb, href: "/intel", shortcut: "3" },
-  { id: "history" as const, label: "Claude 历史", icon: History, href: "/claude", shortcut: "4" },
-  { id: "knowledge" as const, label: "Cloud历史知识图谱", icon: GitBranch, href: "/knowledge", shortcut: "5" },
-  { id: "sdk" as const, label: "SDK知识图谱", icon: Cpu, href: "/knowledge/sdk", shortcut: "6" },
-  { id: "mcp" as const, label: "MCP工具", icon: Wrench, href: "/mcp", shortcut: "7" },
+interface NavItem {
+  id: string
+  label: string
+  icon: React.ElementType
+  href: string
+  shortcut?: string
+  children?: { id: string; label: string; href: string }[]
+}
+
+const navItems: NavItem[] = [
+  { id: "home", label: "主页", icon: Home, href: "/", shortcut: undefined },
+  { id: "files", label: "文件中心", icon: FolderOpen, href: "/files", shortcut: "1" },
+  { id: "network", label: "网络枢纽", icon: Network, href: "/network", shortcut: "2" },
+  { id: "intelligence", label: "情报站", icon: Lightbulb, href: "/intel", shortcut: "3" },
+  { id: "history", label: "Claude 历史", icon: History, href: "/claude", shortcut: "4" },
+  {
+    id: "knowledge",
+    label: "知识图谱",
+    icon: GitBranch,
+    href: "/knowledge",
+    shortcut: "5",
+    children: [
+      { id: "knowledge-cloud", label: "Cloud历史", href: "/knowledge" },
+      { id: "knowledge-sdk", label: "SDK", href: "/knowledge/sdk" },
+    ],
+  },
+  { id: "mcp", label: "MCP工具", icon: Wrench, href: "/mcp", shortcut: "6" },
 ]
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
+    knowledge: true,
+  })
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/"
     return pathname.startsWith(href)
   }
 
-  // Keyboard shortcuts ⌘1-5 for zone pages
+  const toggleGroup = (id: string) => {
+    setExpandedGroups((prev) => ({ ...prev, [id]: !prev[id] }))
+  }
+
+  // Keyboard shortcuts ⌘1-6 for zone pages
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey) {
@@ -71,35 +96,101 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {navItems.map((item) => {
             const Icon = item.icon
             const active = isActive(item.href)
+            const hasChildren = !!item.children?.length
+            const isExpanded = expandedGroups[item.id]
+
             return (
-              <Link
-                key={item.id}
-                href={item.href}
-                className={cn(
-                  "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 group relative",
-                  active
-                    ? "text-sidebar-primary-foreground bg-sidebar-primary/10"
-                    : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"
+              <div key={item.id}>
+                {/* Parent item */}
+                {hasChildren ? (
+                  <button
+                    onClick={() => toggleGroup(item.id)}
+                    className={cn(
+                      "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 group relative",
+                      active
+                        ? "text-sidebar-primary-foreground bg-sidebar-primary/10"
+                        : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"
+                    )}
+                  >
+                    {/* Active indicator bar */}
+                    {active && (
+                      <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-gradient-to-b from-primary to-chart-2" />
+                    )}
+                    <Icon
+                      className={cn(
+                        "w-[18px] h-[18px] shrink-0 transition-colors",
+                        active ? "text-primary" : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground/80"
+                      )}
+                      strokeWidth={1.5}
+                    />
+                    <span className="flex-1 text-left">{item.label}</span>
+                    <ChevronDown
+                      className={cn(
+                        "w-3.5 h-3.5 text-sidebar-foreground/40 transition-transform duration-200",
+                        !isExpanded && "-rotate-90"
+                      )}
+                      strokeWidth={1.5}
+                    />
+                    {item.shortcut && (
+                      <kbd className="hidden text-[10px] font-mono text-sidebar-foreground/40 group-hover:text-sidebar-foreground/60 px-1 py-0.5 rounded bg-sidebar-accent/30">
+                        ⌘{item.shortcut}
+                      </kbd>
+                    )}
+                  </button>
+                ) : (
+                  <Link
+                    href={item.href}
+                    className={cn(
+                      "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 group relative",
+                      active
+                        ? "text-sidebar-primary-foreground bg-sidebar-primary/10"
+                        : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"
+                    )}
+                  >
+                    {/* Active indicator bar */}
+                    {active && (
+                      <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-gradient-to-b from-primary to-chart-2" />
+                    )}
+                    <Icon
+                      className={cn(
+                        "w-[18px] h-[18px] shrink-0 transition-colors",
+                        active ? "text-primary" : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground/80"
+                      )}
+                      strokeWidth={1.5}
+                    />
+                    <span className="flex-1">{item.label}</span>
+                    {item.shortcut && (
+                      <kbd className="hidden text-[10px] font-mono text-sidebar-foreground/40 group-hover:text-sidebar-foreground/60 px-1 py-0.5 rounded bg-sidebar-accent/30">
+                        ⌘{item.shortcut}
+                      </kbd>
+                    )}
+                  </Link>
                 )}
-              >
-                {/* Active indicator bar */}
-                {active && (
-                  <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-gradient-to-b from-primary to-chart-2" />
+
+                {/* Children */}
+                {hasChildren && isExpanded && (
+                  <div className="ml-4 mt-0.5 space-y-0.5 border-l border-sidebar-border/30 pl-2">
+                    {item.children?.map((child) => {
+                      const childActive = pathname === child.href || (child.href !== "/" && pathname.startsWith(child.href))
+                      return (
+                        <Link
+                          key={child.id}
+                          href={child.href}
+                          className={cn(
+                            "flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all duration-200",
+                            childActive
+                              ? "text-sidebar-primary-foreground bg-sidebar-primary/10 font-medium"
+                              : "text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/30"
+                          )}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-sidebar-foreground/30" />
+                          <span>{child.label}</span>
+                        </Link>
+                      )
+                    })}
+                  </div>
                 )}
-                <Icon
-                  className={cn(
-                    "w-[18px] h-[18px] shrink-0 transition-colors",
-                    active ? "text-primary" : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground/80"
-                  )}
-                  strokeWidth={1.5}
-                />
-                <span className="flex-1">{item.label}</span>
-                {item.shortcut && (
-                  <kbd className="hidden text-[10px] font-mono text-sidebar-foreground/40 group-hover:text-sidebar-foreground/60 px-1 py-0.5 rounded bg-sidebar-accent/30">
-                    ⌘{item.shortcut}
-                  </kbd>
-                )}
-              </Link>
+              </div>
             )
           })}
         </nav>

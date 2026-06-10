@@ -39,6 +39,8 @@ interface KnowledgeGraphProps {
   nodeColors?: Record<string, string>
   nodeIcons?: Record<string, React.ReactNode>
   title?: string
+  highlightNodeId?: string | null
+  onNodeSelect?: (node: Node | null) => void
 }
 
 // ─── Default Constants ──────────────────────────────────────────────────────
@@ -60,8 +62,14 @@ const DEFAULT_NODE_ICONS: Record<string, React.ReactNode> = {
   Session: <MessageSquare className="w-3.5 h-3.5" strokeWidth={1.5} />,
 }
 
-// SDK Graph Node Colors
+// SDK Graph Node Colors (Semantic 4-Dimension Model)
 export const SDK_NODE_COLORS: Record<string, string> = {
+  BusinessLogic: "#3b82f6",   // 业务逻辑 - 蓝
+  ProtocolCMD: "#22c55e",     // 协议报文 - 绿
+  TCUCallback: "#f59e0b",     // TCU回调 - 琥珀
+  FaultScenario: "#ef4444",   // 故障场景 - 红
+  Layer: "#64748b",           // 分层节点 - 灰
+  // Legacy types (fallback)
   FaultCode: "#ef4444",
   Command: "#3b82f6",
   Protocol: "#22c55e",
@@ -82,7 +90,7 @@ const FORCE_LINK_DISTANCE = 100
 const FORCE_COLLIDE = 30
 
 // ─── Component ──────────────────────────────────────────────────────
-export function KnowledgeGraph({ data, nodeColors, nodeIcons, title }: KnowledgeGraphProps) {
+export function KnowledgeGraph({ data, nodeColors, nodeIcons, title, highlightNodeId, onNodeSelect }: KnowledgeGraphProps) {
   const NODE_COLORS = nodeColors || DEFAULT_NODE_COLORS
   const NODE_ICONS = nodeIcons || DEFAULT_NODE_ICONS
   const svgRef = useRef<SVGSVGElement>(null)
@@ -200,6 +208,22 @@ export function KnowledgeGraph({ data, nodeColors, nodeIcons, title }: Knowledge
       .attr("stroke-width", 1)
       .attr("marker-end", "url(#arrow)")
 
+    // Edge type Chinese mapping
+    const EDGE_TYPE_CN: Record<string, string> = {
+      "belongs_to": "属于",
+      "triggers": "触发",
+      "enables": "使能",
+      "may_trigger": "可能触发",
+      "generates": "产生",
+      "prerequisite": "前置条件",
+      "updates": "更新",
+      "supports": "支撑",
+      "implements": "实现",
+      "affects": "影响",
+      "carries": "携带",
+      "may_report": "可能上报",
+    }
+
     // Link labels (edge type)
     const linkLabel = g.append("g")
       .attr("class", "link-labels")
@@ -210,7 +234,7 @@ export function KnowledgeGraph({ data, nodeColors, nodeIcons, title }: Knowledge
       .attr("fill", "var(--muted-foreground)")
       .attr("text-anchor", "middle")
       .attr("opacity", 0.5)
-      .text(d => (d as any).type || "")
+      .text(d => EDGE_TYPE_CN[(d as any).type] || (d as any).type || "")
 
     // Nodes group
     const node = g.append("g")
@@ -245,9 +269,9 @@ export function KnowledgeGraph({ data, nodeColors, nodeIcons, title }: Knowledge
       .attr("stroke-width", 2)
       .attr("opacity", 0.9)
 
-    // Node labels
+    // Node labels - show Chinese label instead of technical id
     const labels = node.append("text")
-      .text(d => (d as any).name || d.id)
+      .text(d => (d as any).label || (d as any).name || d.id)
       .attr("font-size", "11px")
       .attr("font-weight", 500)
       .attr("fill", "var(--foreground)")
@@ -332,30 +356,65 @@ export function KnowledgeGraph({ data, nodeColors, nodeIcons, title }: Knowledge
     }
   }, [data, dimensions, getNodeRadius])
 
+  // Highlight specific node from external (navigation panel)
+  useEffect(() => {
+    if (!svgRef.current || !highlightNodeId) return
+    const svg = d3.select(svgRef.current)
+    const targetNode = data.nodes.find(n => n.id === highlightNodeId)
+    if (!targetNode) return
+
+    setSelectedNode(targetNode)
+    if (onNodeSelect) onNodeSelect(targetNode)
+
+    // Highlight the node and its connections
+    svg.selectAll<SVGCircleElement, Node>(".nodes circle")
+      .attr("opacity", d => d.id === highlightNodeId ? 1 : 0.2)
+    svg.selectAll<SVGTextElement, Node>(".nodes text")
+      .attr("opacity", d => d.id === highlightNodeId ? 1 : 0.2)
+    svg.selectAll<SVGLineElement, d3.SimulationLinkDatum<Node>>(".links line")
+      .attr("stroke-opacity", d => {
+        const s = (d.source as Node).id
+        const t = (d.target as Node).id
+        return s === highlightNodeId || t === highlightNodeId ? 0.7 : 0.08
+      })
+      .attr("stroke-width", d => {
+        const s = (d.source as Node).id
+        const t = (d.target as Node).id
+        return s === highlightNodeId || t === highlightNodeId ? 1.5 : 0.5
+      })
+    svg.selectAll<SVGTextElement, d3.SimulationLinkDatum<Node>>(".link-labels text")
+      .attr("opacity", d => {
+        const s = (d.source as Node).id
+        const t = (d.target as Node).id
+        return s === highlightNodeId || t === highlightNodeId ? 0.8 : 0.15
+      })
+  }, [highlightNodeId, data, onNodeSelect])
+
   // Re-apply search highlight when query changes
   useEffect(() => {
     if (!svgRef.current) return
     const svg = d3.select(svgRef.current)
 
-    if (!searchQuery.trim()) {
+    if (!searchQuery.trim() && !highlightNodeId) {
       svg.selectAll(".nodes circle").attr("opacity", 0.9)
       svg.selectAll(".nodes text").attr("opacity", 1)
-      svg.selectAll(".links line").attr("stroke-opacity", 0.25)
+      svg.selectAll(".links line").attr("stroke-opacity", 0.25).attr("stroke-width", 1)
       svg.selectAll(".link-labels text").attr("opacity", 0.5)
       return
     }
 
     const q = searchQuery.toLowerCase()
+    if (!q) return
 
     svg.selectAll<SVGCircleElement, Node>(".nodes circle")
       .attr("opacity", d => {
-        const matched = d.id.toLowerCase().includes(q) || d.type.toLowerCase().includes(q)
+        const matched = ((d as any).label || d.id).toLowerCase().includes(q) || d.type.toLowerCase().includes(q)
         return matched ? 1 : 0.15
       })
 
     svg.selectAll<SVGTextElement, Node>(".nodes text")
       .attr("opacity", d => {
-        const matched = d.id.toLowerCase().includes(q) || d.type.toLowerCase().includes(q)
+        const matched = ((d as any).label || d.id).toLowerCase().includes(q) || d.type.toLowerCase().includes(q)
         return matched ? 1 : 0.15
       })
 
@@ -374,7 +433,7 @@ export function KnowledgeGraph({ data, nodeColors, nodeIcons, title }: Knowledge
         const matched = s.includes(q) || t.includes(q)
         return matched ? 0.7 : 0.1
       })
-  }, [searchQuery])
+  }, [searchQuery, highlightNodeId])
 
   // Zoom controls
   const handleZoomIn = () => {

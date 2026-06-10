@@ -236,7 +236,7 @@ export default function KnowledgePage() {
     <div className="p-6 sm:p-8 max-w-6xl mx-auto h-full flex flex-col">
       {/* Page Header */}
       <div className="mb-6">
-        <h1 className="text-2xl font-bold tracking-tight">☁️ Cloud历史知识图谱</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Cloud历史知识图谱</h1>
         <p className="text-sm text-muted-foreground mt-1">
           Claude Code 会话历史 · 概念关联 · 决策追踪 · 会话溯源
         </p>
