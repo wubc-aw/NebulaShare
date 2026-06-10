@@ -9,7 +9,9 @@ import json
 
 # ── Config ──────────────────────────────────────────────────────────
 
-DB_PATH = os.path.join(os.path.expanduser("~/.config/nebulashare"), "intel.db")
+NEBULA_STATE_DIR = os.environ.get("NEBULA_STATE_DIR",
+                                  os.path.expanduser("~/.config/nebulashare"))
+DB_PATH = os.path.join(NEBULA_STATE_DIR, "intel.db")
 
 # ── Schema ──────────────────────────────────────────────────────────
 
