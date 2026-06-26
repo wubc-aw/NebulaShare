@@ -24,6 +24,7 @@ import yaml
 import requests
 import intel_db
 import intel_sync
+import intel_summarizer
 from flask_apscheduler import APScheduler
 
 # ── Config ──────────────────────────────────────────────────────────
@@ -1264,7 +1265,37 @@ def intel_article_get(article_id):
     art = intel_db.get_article(article_id)
     if not art:
         return jsonify({"error": "not found"}), 404
+    # Fall back to summary when no full content is available
+    if not art.get("content"):
+        art["content"] = art.get("summary") or ""
+    # If deep_summary exists, also expose it
     return jsonify(art)
+
+
+@app.route("/api/intel/articles/<int:article_id>/summarize", methods=["POST"])
+def intel_article_summarize(article_id):
+    """Generate a deep summary for an article using Kimi K2.7."""
+    art = intel_db.get_article(article_id)
+    if not art:
+        return jsonify({"error": "not found"}), 404
+
+    # If already has deep_summary, return it unless force=true
+    force = request.args.get("force", "false").lower() == "true"
+    if art.get("deep_summary") and not force:
+        return jsonify({"ok": True, "deep_summary": art["deep_summary"], "cached": True})
+
+    try:
+        deep_summary = intel_summarizer.generate_deep_summary_for_article(art)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    # Save to DB
+    try:
+        updated = intel_db.update_article(article_id, deep_summary=deep_summary)
+    except Exception as exc:
+        return jsonify({"error": f"summary generated but save failed: {exc}"}), 500
+
+    return jsonify({"ok": True, "deep_summary": deep_summary, "cached": False, "article": updated})
 
 
 @app.route("/api/intel/articles/<int:article_id>", methods=["PUT"])
@@ -1538,6 +1569,39 @@ def reach_check_all():
     for thr in threads:
         thr.join(timeout=8.0)
     return jsonify({"ok": True, "results": [r for r in results if r is not None]})
+
+
+# ── Search Hub: local gateway proxy ─────────────────────────────────
+SEARCH_HUB_URL = os.environ.get("SEARCH_HUB_URL", "http://127.0.0.1:18088")
+
+
+def _search_hub_get(path, params=None, timeout=10):
+    try:
+        r = requests.get(
+            SEARCH_HUB_URL.rstrip("/") + path,
+            params=params or {},
+            timeout=timeout,
+        )
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.route("/api/search-hub/providers")
+def api_search_hub_providers():
+    return _search_hub_get("/providers", timeout=6)
+
+
+@app.route("/api/search-hub/search")
+def api_search_hub_search():
+    params = {
+        "q": request.args.get("q", ""),
+        "max": request.args.get("max", "4"),
+    }
+    providers = request.args.get("providers", "")
+    if providers:
+        params["providers"] = providers
+    return _search_hub_get("/search", params=params, timeout=15)
 
 
 # ── PC Console: Wake-on-LAN + Status + Shutdown ─────────────────────
@@ -4010,6 +4074,93 @@ input[type="file"] { display: none; }
   background: var(--cyan);
   box-shadow: 0 0 8px var(--cyan);
 }
+.search-hub-top {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.search-hub-pill {
+  background: rgba(255,255,255,0.025);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.search-hub-pill .label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.search-hub-pill .value {
+  font-family: "SF Mono", monospace;
+  font-size: 0.95rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+.search-hub-pill .value.green { color: #4ade80; }
+.search-hub-pill .value.pink { color: var(--pink); }
+.search-hub-pill .value.cyan { color: var(--cyan); }
+.search-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.search-provider {
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: rgba(255,255,255,0.02);
+  font-size: 0.78rem;
+}
+.search-provider .name {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--text);
+}
+.search-provider .meta {
+  color: var(--muted);
+  font-family: "SF Mono", monospace;
+  font-size: 0.7rem;
+}
+.search-provider.on .name span:last-child { color: #4ade80; }
+.search-provider.off { opacity: 0.55; }
+.search-provider.cooldown .name span:last-child { color: #fbbf24; }
+.search-hub-row {
+  display: grid;
+  grid-template-columns: 1fr 210px auto;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.search-hub-results {
+  display: grid;
+  gap: 8px;
+}
+.search-result {
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: rgba(255,255,255,0.02);
+}
+.search-result a {
+  color: var(--cyan);
+  text-decoration: none;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+.search-result .meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-top: 4px;
+}
+@media (max-width: 760px) {
+  .search-hub-top { grid-template-columns: repeat(2, 1fr); }
+  .search-hub-row { grid-template-columns: 1fr; }
+}
 
 .client-row {
   display: grid;
@@ -5699,6 +5850,42 @@ export PC_SSH_USER="{{PC_SSH_USER}}"</code></pre>
         </div>
 
         <div class="glass gw-card">
+          <h4>
+            <span class="accent" style="background:#4ade80;box-shadow:0 0 8px #4ade80"></span>
+            搜索节点 · Search Hub
+            <span style="margin-left:auto;color:var(--muted);font-size:0.78rem;font-weight:400" id="searchHubHint">读取中…</span>
+          </h4>
+          <div class="search-hub-top">
+            <div class="search-hub-pill">
+              <div class="label">服务</div>
+              <div class="value" id="shStatus">--</div>
+            </div>
+            <div class="search-hub-pill">
+              <div class="label">Provider</div>
+              <div class="value cyan" id="shProviders">--</div>
+            </div>
+            <div class="search-hub-pill">
+              <div class="label">已配置</div>
+              <div class="value green" id="shConfigured">--</div>
+            </div>
+            <div class="search-hub-pill">
+              <div class="label">受限</div>
+              <div class="value pink" id="shLimited">--</div>
+            </div>
+          </div>
+          <div class="search-provider-grid" id="searchProviderGrid">
+            <div class="empty">加载中…</div>
+          </div>
+          <div class="search-hub-row">
+            <input class="gw-input" id="searchHubQuery" placeholder="测试搜索，如 OpenAI Responses API" spellcheck="false">
+            <input class="gw-input" id="searchHubProviders" placeholder="providers，可留空" spellcheck="false">
+            <button class="btn btn-primary btn-mini" id="searchHubBtn" onclick="testSearchHub()">测试</button>
+          </div>
+          <div class="gw-muted-hint" id="searchHubMeta">无 key 源会直接使用；商业源只在已配置 key 且本地额度保护未耗尽时使用。</div>
+          <div class="search-hub-results" id="searchHubResults"></div>
+        </div>
+
+        <div class="glass gw-card">
           <h4><span class="accent"></span>当前客户端 <span style="margin-left:auto;color:var(--muted);font-size:0.78rem;font-weight:400" id="gwClientsHint">读取中…</span></h4>
           <div id="gwClients"></div>
         </div>
@@ -7307,8 +7494,80 @@ async function editClientName(ip) {
   } catch (e) { showToast('保存失败'); }
 }
 
+function searchProviderHtml(name, p) {
+  const configured = !!p.configured;
+  const cooldown = Number(p.cooldown_sec || 0);
+  const limited = p.remaining === 0;
+  const cls = cooldown > 0 ? 'cooldown' : (configured && !limited ? 'on' : 'off');
+  const state = cooldown > 0 ? ('冷却 ' + cooldown + 's') : (configured ? (limited ? '额度尽' : '可用') : '未配置');
+  const rem = p.remaining == null ? 'free' : ('remain ' + p.remaining);
+  const use = p.usage ? ('used ' + (p.usage.month || 0) + '/' + (p.usage.day || 0)) : '';
+  return `<div class="search-provider ${cls}">
+    <div class="name"><span>${escHtml(name)}</span><span>${escHtml(state)}</span></div>
+    <div class="meta">${escHtml(rem)} ${escHtml(use)}</div>
+  </div>`;
+}
+
+async function loadSearchHub() {
+  const hint = document.getElementById('searchHubHint');
+  const grid = document.getElementById('searchProviderGrid');
+  try {
+    const r = await fetch('/api/search-hub/providers');
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'search hub offline');
+    const providers = d.providers || {};
+    const names = Object.keys(providers);
+    const configured = names.filter(n => providers[n].configured).length;
+    const limited = names.filter(n => (providers[n].remaining === 0) || (providers[n].cooldown_sec || 0) > 0).length;
+    document.getElementById('shStatus').textContent = 'ONLINE';
+    document.getElementById('shStatus').className = 'value green';
+    document.getElementById('shProviders').textContent = names.length;
+    document.getElementById('shConfigured').textContent = configured;
+    document.getElementById('shLimited').textContent = limited;
+    if (hint) hint.textContent = (d.order || []).slice(0, 5).join(' → ') + ((d.order || []).length > 5 ? ' …' : '');
+    if (grid) grid.innerHTML = (d.order || names).map(n => searchProviderHtml(n, providers[n] || {})).join('');
+  } catch (e) {
+    document.getElementById('shStatus').textContent = 'OFFLINE';
+    document.getElementById('shStatus').className = 'value pink';
+    document.getElementById('shProviders').textContent = '--';
+    document.getElementById('shConfigured').textContent = '--';
+    document.getElementById('shLimited').textContent = '--';
+    if (hint) hint.textContent = e.message;
+    if (grid) grid.innerHTML = '<div class="empty">Search Hub 不可达</div>';
+  }
+}
+
+async function testSearchHub() {
+  const q = (document.getElementById('searchHubQuery').value || '').trim();
+  const providers = (document.getElementById('searchHubProviders').value || '').trim();
+  const btn = document.getElementById('searchHubBtn');
+  const meta = document.getElementById('searchHubMeta');
+  const out = document.getElementById('searchHubResults');
+  if (!q) { showToast('请输入搜索关键词'); return; }
+  btn.disabled = true;
+  btn.textContent = '搜索中...';
+  out.innerHTML = '';
+  try {
+    const url = '/api/search-hub/search?q=' + encodeURIComponent(q) + '&max=4' + (providers ? '&providers=' + encodeURIComponent(providers) : '');
+    const r = await fetch(url);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'search failed');
+    meta.textContent = (d.cached ? '缓存命中' : '实时查询') + ' · ' + (d.providers || []).join(', ') + ' · ' + (d.elapsed_ms || 0) + 'ms';
+    out.innerHTML = (d.results || []).map(item => `<div class="search-result">
+      <a href="${escAttr(item.url)}" target="_blank" rel="noopener noreferrer">${escHtml(item.title || item.url)}</a>
+      <div class="meta">${escHtml(item.source || '')} · ${escHtml((item.content || '').slice(0, 160))}</div>
+    </div>`).join('') || '<div class="empty">无结果</div>';
+    loadSearchHub();
+  } catch (e) {
+    meta.textContent = '搜索失败: ' + e.message;
+    out.innerHTML = '<div class="empty">搜索失败</div>';
+  }
+  btn.disabled = false;
+  btn.textContent = '测试';
+}
+
 async function loadAllGw() {
-  await Promise.all([loadGwStatus(), loadGroups(), loadClients(), loadRecent()]);
+  await Promise.all([loadGwStatus(), loadGroups(), loadClients(), loadRecent(), loadSearchHub()]);
 }
 
 loadClientNames().then(loadAllGw);
@@ -7316,6 +7575,7 @@ setInterval(loadGwStatus, 3000);
 setInterval(loadClients, 4000);
 setInterval(loadRecent, 5000);
 setInterval(loadGroups, 30000);  // groups change rarely; refresh selection state
+setInterval(loadSearchHub, 30000);
 
 // ── Reachability ──
 let REACH_TARGETS_CACHE = [];

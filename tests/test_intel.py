@@ -75,11 +75,11 @@ def test_create_article():
     assert article["content"] == "Full article body here..."
     assert article["url"] == "https://example.com/edge"
     assert article["author"] == "Ada Lovelace"
-    assert article["published_at"] == "2026-06-01T00:00:00+00:00"
+    assert article["date"] == "2026-06-01T00:00:00+00:00"
     assert article["category"] == "tech"
     assert article["is_read"] == 0
     assert article["is_starred"] == 0
-    assert article["source_name"] == "Test Feed"
+    assert article["source"] == "Test Feed"
     assert article["tags"] == []
 
 

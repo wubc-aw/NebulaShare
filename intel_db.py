@@ -36,8 +36,9 @@ CREATE TABLE IF NOT EXISTS articles (
     source_id   INTEGER NOT NULL,
     external_id TEXT,                         -- id from upstream
     title       TEXT    NOT NULL,
-    summary     TEXT,
-    content     TEXT,
+    summary      TEXT,
+    deep_summary TEXT,
+    content      TEXT,
     url         TEXT,
     author      TEXT,
     published_at TEXT,
@@ -108,13 +109,31 @@ def _row_to_dict(row):
     return dict(row) if row else None
 
 
+def _normalize_article(row_dict, tags=None):
+    """Normalize raw article row for the frontend contract.
+
+    Maps database aliases to frontend field names and ensures a
+    ``tags`` list is always present.
+    """
+    if row_dict is None:
+        return None
+    article = dict(row_dict)
+    article["source"] = article.pop("source_name", article.get("source"))
+    article["date"] = article.pop("published_at", article.get("date"))
+    article["tags"] = tags if tags is not None else []
+    return article
+
+
 # ── Init ────────────────────────────────────────────────────────────
 
 def init_db():
     """Create tables, indexes, seed default sources and tags."""
     with _conn() as conn:
         conn.executescript(SCHEMA_SQL)
-
+        # Migration: add deep_summary column if missing
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(articles)")]
+        if "deep_summary" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN deep_summary TEXT")
         # Seed built-in sources
         conn.execute(
             """
@@ -282,6 +301,25 @@ def list_articles(
         ).fetchall()
 
         articles = [_row_to_dict(r) for r in rows]
+        if articles:
+            article_ids = [a["id"] for a in articles]
+            placeholders = ",".join("?" * len(article_ids))
+            tag_rows = conn.execute(
+                f"""
+                SELECT at.article_id, t.*
+                FROM article_tags at
+                JOIN tags t ON t.id = at.tag_id
+                WHERE at.article_id IN ({placeholders})
+                ORDER BY t.name
+                """,
+                article_ids,
+            ).fetchall()
+            tags_by_article: dict[int, list] = {a["id"]: [] for a in articles}
+            for tr in tag_rows:
+                tag = _row_to_dict(tr)
+                aid = tag.pop("article_id")
+                tags_by_article[aid].append(tag)
+            articles = [_normalize_article(a, tags_by_article[a["id"]]) for a in articles]
         return articles, total
 
 
@@ -299,13 +337,12 @@ def get_article(article_id):
         ).fetchone()
         if not row:
             return None
-        article = _row_to_dict(row)
         tag_rows = conn.execute(
             "SELECT t.* FROM tags t JOIN article_tags at ON at.tag_id = t.id WHERE at.article_id = ?",
             (article_id,),
         ).fetchall()
-        article["tags"] = [_row_to_dict(r) for r in tag_rows]
-        return article
+        tags = [_row_to_dict(r) for r in tag_rows]
+        return _normalize_article(_row_to_dict(row), tags)
 
 
 def create_article(
@@ -313,6 +350,7 @@ def create_article(
     title,
     external_id=None,
     summary=None,
+    deep_summary=None,
     content=None,
     url=None,
     author=None,
@@ -324,15 +362,16 @@ def create_article(
         cur = conn.execute(
             """
             INSERT INTO articles
-                (source_id, external_id, title, summary, content, url,
+                (source_id, external_id, title, summary, deep_summary, content, url,
                  author, published_at, category, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source_id,
                 external_id,
                 title,
                 summary,
+                deep_summary,
                 content,
                 url,
                 author,
@@ -349,6 +388,7 @@ def update_article(article_id, **fields):
     allowed_map = {
         "title": "title",
         "summary": "summary",
+        "deep_summary": "deep_summary",
         "content": "content",
         "url": "url",
         "author": "author",
@@ -376,13 +416,12 @@ def update_article(article_id, **fields):
         ).fetchone()
         if not row:
             return None
-        article = _row_to_dict(row)
         tag_rows = conn.execute(
             "SELECT t.* FROM tags t JOIN article_tags at ON at.tag_id = t.id WHERE at.article_id = ?",
             (article_id,),
         ).fetchall()
-        article["tags"] = [_row_to_dict(r) for r in tag_rows]
-        return article
+        tags = [_row_to_dict(r) for r in tag_rows]
+        return _normalize_article(_row_to_dict(row), tags)
 
 
 def delete_article(article_id):

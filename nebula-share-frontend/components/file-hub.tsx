@@ -142,6 +142,7 @@ export function FileHub() {
   const [storageItems, setStorageItems] = useState<StorageItem[]>([])
   const [storageLoading, setStorageLoading] = useState(false)
   const [storageError, setStorageError] = useState("")
+  const [storageRefreshKey, setStorageRefreshKey] = useState(0)
 
   // Fetch exchange files
   useEffect(() => {
@@ -225,7 +226,7 @@ export function FileHub() {
         if (!cancelled) setStorageLoading(false)
       })
     return () => { cancelled = true }
-  }, [activeTab, selectedDevice, currentPath])
+  }, [activeTab, selectedDevice, currentPath, storageRefreshKey])
 
   const handleDelete = useCallback(async (filename: string) => {
     if (!confirm(`删除 ${filename}？`)) return
@@ -323,6 +324,30 @@ export function FileHub() {
       .finally(() => setExchangeLoading(false))
     e.target.value = ""
   }, [])
+
+  const handleStorageFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !selectedDevice) return
+    setStorageLoading(true)
+    const form = new FormData()
+    form.append("file", file)
+    const qs = new URLSearchParams({ root: selectedDevice, path: currentPath })
+    fetch(`/api/storage/upload?${qs}`, { method: "POST", body: form })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.ok === false) {
+          setStorageError(data.error || "上传失败")
+          setStorageLoading(false)
+        } else {
+          setStorageRefreshKey((k) => k + 1)
+        }
+      })
+      .catch(() => {
+        setStorageError("网络错误")
+        setStorageLoading(false)
+      })
+    e.target.value = ""
+  }, [selectedDevice, currentPath])
 
   const handleStorageNavigate = useCallback((name: string) => {
     setCurrentPath((prev) => (prev ? `${prev}/${name}` : name))
@@ -545,10 +570,11 @@ export function FileHub() {
 
           {/* Actions */}
           <div className="flex items-center gap-2">
-            <button className="flex items-center gap-2 px-3 py-1.5 bg-foreground text-background rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">
+            <label className="flex items-center gap-2 px-3 py-1.5 bg-foreground text-background rounded-lg text-sm font-medium hover:opacity-90 transition-opacity cursor-pointer">
               <Upload className="w-4 h-4" strokeWidth={1.5} />
               上传
-            </button>
+              <input type="file" className="hidden" onChange={handleStorageFileInput} />
+            </label>
             <button className="flex items-center gap-2 px-3 py-1.5 bg-secondary/60 rounded-lg text-sm hover:bg-secondary transition-colors">
               <Plus className="w-4 h-4" strokeWidth={1.5} />
               新建文件夹

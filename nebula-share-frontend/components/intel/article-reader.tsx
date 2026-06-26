@@ -9,6 +9,8 @@ import {
   Archive,
   ExternalLink,
   BookOpen,
+  Sparkles,
+  Loader2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { Article, TagItem } from "./article-list-item"
@@ -31,11 +33,16 @@ interface ArticleReaderProps {
 
 export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps) {
   const [isVisible, setIsVisible] = useState(false)
+  const [deepSummary, setDeepSummary] = useState<string | null>(null)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [generateError, setGenerateError] = useState<string | null>(null)
 
   useEffect(() => {
     if (article) {
-      // Small delay to trigger enter animation
       requestAnimationFrame(() => setIsVisible(true))
+      // Reset deep summary state when article changes
+      setDeepSummary(article.deep_summary || null)
+      setGenerateError(null)
     } else {
       setIsVisible(false)
     }
@@ -65,6 +72,31 @@ export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps
   const handleArchive = () => {
     onUpdate(article.id, { is_archived: !article.is_archived })
   }
+
+  const handleGenerateDeepSummary = async () => {
+    setIsGenerating(true)
+    setGenerateError(null)
+    try {
+      const resp = await fetch(`/api/intel/articles/${article.id}/summarize`, {
+        method: "POST",
+      })
+      const data = await resp.json()
+      if (!resp.ok) {
+        setGenerateError(data.error || "生成失败")
+      } else {
+        setDeepSummary(data.deep_summary)
+        // Update parent article state
+        onUpdate(article.id, { deep_summary: data.deep_summary })
+      }
+    } catch (err) {
+      setGenerateError(String(err))
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  // Parse deep summary sections for structured rendering
+  const parsedSections = parseDeepSummary(deepSummary)
 
   return (
     <div
@@ -114,9 +146,9 @@ export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps
           </div>
 
           {/* Tags */}
-          {article.tags.length > 0 && (
+          {(article.tags || []).length > 0 && (
             <div className="flex items-center gap-1.5 mb-5 flex-wrap">
-              {article.tags.map((tag) => (
+              {(article.tags || []).map((tag) => (
                 <span
                   key={tag.id}
                   className="px-2 py-0.5 rounded-md bg-secondary text-xs text-muted-foreground font-medium"
@@ -127,27 +159,85 @@ export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps
             </div>
           )}
 
-          {/* Summary box */}
-          <div className="p-4 rounded-xl bg-accent/30 border border-accent/20 mb-6">
-            <p className="text-sm text-accent-foreground/90 leading-relaxed">
-              {article.summary}
-            </p>
-          </div>
+          {/* Deep Summary */}
+          {deepSummary ? (
+            <div className="space-y-5">
+              {/* Original summary as a compact header */}
+              {article.summary && (
+                <div className="p-3 rounded-lg bg-accent/20 border border-accent/15">
+                  <p className="text-sm text-accent-foreground/80 leading-relaxed">
+                    {article.summary}
+                  </p>
+                </div>
+              )}
 
-          {/* Content */}
-          {article.content ? (
-            <div
-              className="prose prose-sm dark:prose-invert max-w-none
-                prose-headings:text-[15px] prose-headings:font-semibold prose-headings:tracking-tight
-                prose-p:text-muted-foreground prose-p:leading-relaxed
-                prose-a:text-chart-1 prose-a:no-underline hover:prose-a:underline
-                prose-strong:text-foreground
-                prose-ul:text-muted-foreground prose-ol:text-muted-foreground"
-              dangerouslySetInnerHTML={{ __html: article.content }}
-            />
+              {/* Structured deep summary sections */}
+              {parsedSections.map((section, idx) => (
+                <div key={idx} className="space-y-2">
+                  <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                    <span className="w-1 h-4 rounded-full bg-chart-1" />
+                    {section.title}
+                  </h2>
+                  <div className="text-sm text-muted-foreground leading-relaxed pl-3">
+                    {section.isList ? (
+                      <ul className="space-y-1.5">
+                        {section.items.map((item, i) => (
+                          <li key={i} className="flex gap-2">
+                            <span className="text-chart-1 mt-1.5 shrink-0">•</span>
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="whitespace-pre-wrap">{section.content}</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : (
-            <div className="p-6 rounded-xl bg-secondary/40 text-center">
-              <p className="text-sm text-muted-foreground">暂无全文内容 · 点击「原文」阅读完整文章</p>
+            /* No deep summary yet — show original summary + generate button */
+            <div className="space-y-5">
+              {article.summary && (
+                <div className="p-4 rounded-xl bg-accent/30 border border-accent/20">
+                  <p className="text-sm text-accent-foreground/90 leading-relaxed">
+                    {article.summary}
+                  </p>
+                </div>
+              )}
+
+              {/* Generate deep summary CTA */}
+              <div className="p-5 rounded-xl bg-secondary/40 border border-border/40 text-center space-y-3">
+                <Sparkles className="w-5 h-5 text-chart-1 mx-auto" strokeWidth={1.5} />
+                <p className="text-sm text-muted-foreground">
+                  使用 Kimi K2.7 生成深度分析
+                </p>
+                <button
+                  onClick={handleGenerateDeepSummary}
+                  disabled={isGenerating}
+                  className={cn(
+                    "inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all",
+                    isGenerating
+                      ? "bg-muted text-muted-foreground cursor-not-allowed"
+                      : "bg-chart-1/15 text-chart-1 hover:bg-chart-1/20"
+                  )}
+                >
+                  {isGenerating ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      生成中...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5" />
+                      生成深度总结
+                    </>
+                  )}
+                </button>
+                {generateError && (
+                  <p className="text-xs text-destructive">{generateError}</p>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -229,4 +319,72 @@ export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps
       </div>
     </div>
   )
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+interface SummarySection {
+  title: string
+  content: string
+  isList: boolean
+  items: string[]
+}
+
+function parseDeepSummary(text: string | null): SummarySection[] {
+  if (!text) return []
+
+  const sections: SummarySection[] = []
+  const lines = text.split("\n")
+  let currentSection: SummarySection | null = null
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+
+    // Match markdown headers like ## 核心要点
+    const headerMatch = trimmed.match(/^#{2,}\s+(.+)$/)
+    if (headerMatch) {
+      if (currentSection) {
+        sections.push(currentSection)
+      }
+      currentSection = {
+        title: headerMatch[1],
+        content: "",
+        isList: false,
+        items: [],
+      }
+      continue
+    }
+
+    if (!currentSection) continue
+
+    // Match bullet points
+    const bulletMatch = trimmed.match(/^[-•*]\s+(.+)$/)
+    if (bulletMatch) {
+      currentSection.isList = true
+      currentSection.items.push(bulletMatch[1])
+      continue
+    }
+
+    // Match numbered lists
+    const numberedMatch = trimmed.match(/^\d+\.\s+(.+)$/)
+    if (numberedMatch) {
+      currentSection.isList = true
+      currentSection.items.push(numberedMatch[1])
+      continue
+    }
+
+    // Regular content line
+    if (currentSection.content) {
+      currentSection.content += "\n" + trimmed
+    } else {
+      currentSection.content = trimmed
+    }
+  }
+
+  if (currentSection) {
+    sections.push(currentSection)
+  }
+
+  return sections
 }

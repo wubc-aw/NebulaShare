@@ -3,7 +3,7 @@
 import { Search, X, Star, Check } from "lucide-react"
 import { cn } from "@/lib/utils"
 
-const categories = ["全部", "AI", "互联网", "金融", "创投", "工具", "阅读"]
+const categories = ["全部", "AI", "AI工程实践", "开源趋势", "互联网", "金融", "创投", "工具", "阅读"]
 
 interface SearchBarProps {
   search: string

@@ -13,6 +13,7 @@ export interface Article {
   id: number
   title: string
   summary: string
+  deep_summary?: string
   content?: string
   source: string
   category: string
@@ -78,7 +79,7 @@ export function ArticleListItem({ article, selected, onClick, onToggleStar }: Ar
               <span className={cn("w-1.5 h-1.5 rounded-full", dotColor)} />
               <span className="text-xs text-muted-foreground">{article.category}</span>
             </span>
-            {article.tags.map((tag) => (
+            {(article.tags || []).map((tag) => (
               <span
                 key={tag.id}
                 className="px-1.5 py-0.5 rounded-md bg-secondary/80 text-[10px] text-muted-foreground font-medium"
