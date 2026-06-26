@@ -14,6 +14,8 @@ import {
   ChevronDown,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { classifyRegion, CONTINENT_ORDER } from "@/lib/proxy-regions"
+import { ChainLog } from "./network-hub/chain-log"
 
 interface ProxyNode {
   name: string
@@ -69,6 +71,13 @@ interface ClientInfo {
   rule: string
   chain: string
   host_recent: string
+}
+
+interface WanSpeedResult {
+  ok: boolean
+  ping: number
+  download: number
+  upload: number
 }
 
 interface WanSpeedResult {
@@ -164,7 +173,12 @@ export function NetworkHub() {
   const [clients, setClients] = useState<ClientInfo[]>([])
   const [clientsLoading, setClientsLoading] = useState(false)
   const [clientNames, setClientNames] = useState<Record<string, string>>({})
+  const [editingClientIp, setEditingClientIp] = useState<string | null>(null)
+  const [editName, setEditName] = useState("")
+  const [saveNameError, setSaveNameError] = useState<string | null>(null)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  const [expandedContinents, setExpandedContinents] = useState<Set<string>>(new Set(CONTINENT_ORDER))
+  const [providerConfigExpanded, setProviderConfigExpanded] = useState(false)
 
   const fetchStatus = useCallback(async () => {
     setStatusLoading(true)
@@ -259,6 +273,25 @@ export function NetworkHub() {
     }
   }, [])
 
+  const saveClientName = useCallback(async (ip: string, name: string) => {
+    setSaveNameError(null)
+    try {
+      const res = await fetch("/api/clients/names", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ip, name: name.trim() }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.ok) throw new Error(data.error || "save failed")
+      setClientNames(data.names || {})
+      setEditingClientIp(null)
+      setEditName("")
+    } catch (err) {
+      setSaveNameError(err instanceof Error ? err.message : "保存失败")
+    }
+  }, [])
+
   useEffect(() => {
     if (activeTab === "gateway") {
       fetchStatus()
@@ -283,7 +316,27 @@ export function NetworkHub() {
     setIsRefreshing(false)
   }
 
-  const handleNodeSwitch = async (groupName: string, nodeName: string) => {
+  const handleNodeSwitch = async (nodeName: string) => {
+    const groupName = "GLOBAL"
+    const targetMode: "rule" | "global" = routingMode === "global" ? "global" : "rule"
+
+    // If currently direct, switch to rule first so the node actually takes effect
+    if (gatewayEnabled && routingMode === "direct") {
+      setRoutingMode(targetMode)
+      try {
+        const modeRes = await fetch("/api/mihomo/mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: targetMode }),
+        })
+        if (!modeRes.ok) throw new Error(`HTTP ${modeRes.status}`)
+        const modeData = await modeRes.json()
+        if (!modeData.ok) throw new Error("Mode switch failed")
+      } catch (err) {
+        console.error("Mode switch failed:", err)
+      }
+    }
+
     setSelectedNode(`${groupName}::${nodeName}`)
     try {
       const res = await fetch("/api/mihomo/select", {
@@ -294,10 +347,26 @@ export function NetworkHub() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       if (!data.ok) throw new Error("Switch failed")
-      // Refresh to get updated selection
       await fetchNodes()
+      await fetchStatus()
     } catch (err) {
       console.error("Node switch failed:", err)
+    }
+  }
+
+  const handleProviderNodeSwitch = async (groupName: string, nodeName: string) => {
+    try {
+      const res = await fetch("/api/mihomo/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ group: groupName, name: nodeName }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.ok) throw new Error("Switch failed")
+      await fetchNodes()
+    } catch (err) {
+      console.error("Provider node switch failed:", err)
     }
   }
 
@@ -342,6 +411,30 @@ export function NetworkHub() {
   )
 
   const totalNodes = groups.reduce((sum, g) => sum + g.members.length, 0)
+  const globalGroup = groups.find((g) => g.name === "GLOBAL")
+  const effectiveNodeName = !gatewayEnabled
+    ? "服务未运行"
+    : routingMode === "direct"
+    ? "直连"
+    : globalGroup?.now || "未选择"
+
+  const GROUP_TYPES = new Set(["Selector", "URLTest", "Fallback", "LoadBalance", "Direct", "Reject"])
+
+  const flatNodes = groups
+    .flatMap((g) => g.members)
+    .filter((m) => m.name && !GROUP_TYPES.has(m.type || ""))
+    .reduce<ProxyNode[]>((acc, node) => {
+      if (!acc.some((n) => n.name === node.name)) {
+        acc.push(node)
+      }
+      return acc
+    }, [])
+    .sort((a, b) => a.name.localeCompare(b.name))
+
+  const nodesByContinent = CONTINENT_ORDER.map((continent) => ({
+    continent,
+    nodes: flatNodes.filter((n) => classifyRegion(n.name) === continent),
+  })).filter((c) => c.nodes.length > 0)
 
   return (
     <div className="h-full flex flex-col">
@@ -407,120 +500,238 @@ export function NetworkHub() {
               )}
             </div>
 
-            {/* Current Node */}
-            <div className="card-premium p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Globe className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                <span className="text-sm font-semibold">当前节点</span>
-              </div>
-              {groups.length > 0 ? (
-                <div className="flex items-center gap-2">
-                  <p className="text-base font-semibold">{groups[0]?.now || "未选择"}</p>
-                  {groups[0]?.members.find(m => m.name === groups[0]?.now)?.delay && (
-                    <span className="text-xs text-muted-foreground font-mono bg-secondary/60 px-1.5 py-0.5 rounded">
-                      {groups[0]?.members.find(m => m.name === groups[0]?.now)?.delay}ms
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">未选择</p>
-              )}
-            </div>
-          </div>
-
-          {/* ── 2. Subscription ── */}
-          <div>
-            <h3 className="section-header">订阅</h3>
-            <div className="card-premium p-4">
+            {/* Effective Node */}
+            <button
+              onClick={() => {
+                const el = document.getElementById("node-selector")
+                el?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }}
+              className="card-premium p-4 text-left w-full hover:shadow-md transition-shadow"
+            >
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <Globe className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                  <span className="text-sm font-semibold">订阅链接</span>
+                  <span className="text-sm font-semibold">生效节点</span>
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-muted-foreground font-mono">
-                    {subInfo
-                      ? `${subInfo.proxyCount} 节点`
-                      : `${totalNodes} 节点`}
-                  </span>
-                  <button
-                    onClick={handleSubRefresh}
-                    disabled={subRefreshing}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
-                  >
-                    <RefreshCw className={cn("w-3 h-3", subRefreshing && "animate-spin")} strokeWidth={1.5} />
-                    {subRefreshing ? "更新中" : "刷新订阅"}
-                  </button>
-                </div>
+                <span className="text-xs text-muted-foreground font-mono bg-secondary/60 px-2 py-0.5 rounded">
+                  {routingMode === "direct" ? "直连模式" : routingMode === "global" ? "全局代理" : "规则分流"}
+                </span>
               </div>
-              {subError && <p className="text-sm text-destructive mb-2">{subError}</p>}
-              <input
-                type="text"
-                placeholder="订阅链接"
-                className="w-full px-3 py-2 bg-secondary/40 rounded-lg text-sm font-mono text-muted-foreground"
-                defaultValue={status?.subscription?.url || ""}
-                readOnly
-              />
-            </div>
+              <div className="flex items-center gap-2">
+                <p className="text-base font-semibold">{effectiveNodeName}</p>
+                {effectiveNodeName !== "服务未运行" && effectiveNodeName !== "直连" && effectiveNodeName !== "未选择" && globalGroup && (
+                  <span className={cn(
+                    "text-xs font-mono bg-secondary/60 px-1.5 py-0.5 rounded",
+                    (() => {
+                      const delay = globalGroup.members.find(m => m.name === globalGroup.now)?.delay
+                      if (!delay || delay <= 0) return "text-muted-foreground"
+                      if (delay < 100) return "text-emerald-400"
+                      if (delay < 200) return "text-amber-400"
+                      return "text-red-400"
+                    })()
+                  )}>
+                    {globalGroup.members.find(m => m.name === globalGroup.now)?.delay || "--"}ms
+                  </span>
+                )}
+              </div>
+            </button>
           </div>
 
-          {/* ── 3. Node Groups ── */}
-          <div className="flex-1">
-            <h3 className="section-header">代理节点</h3>
+          {/* ── 2. Provider Configuration ── */}
+          <div>
+            <button
+              onClick={() => setProviderConfigExpanded((v) => !v)}
+              className="w-full flex items-center justify-between mb-3 group"
+            >
+              <h3 className="section-header mb-0">订阅商配置</h3>
+              <ChevronDown
+                className={cn(
+                  "w-4 h-4 text-muted-foreground transition-transform duration-200",
+                  providerConfigExpanded && "rotate-180"
+                )}
+                strokeWidth={1.5}
+              />
+            </button>
+
+            {providerConfigExpanded && (
+              <div className="flex flex-col gap-3">
+                {/* Subscription URL + refresh */}
+                <div className="card-premium p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <Globe className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
+                      <span className="text-sm font-semibold">订阅链接</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-muted-foreground font-mono">
+                        {subInfo ? `${subInfo.proxyCount} 节点` : `${totalNodes} 节点`}
+                      </span>
+                      <button
+                        onClick={handleSubRefresh}
+                        disabled={subRefreshing}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
+                      >
+                        <RefreshCw className={cn("w-3 h-3", subRefreshing && "animate-spin")} strokeWidth={1.5} />
+                        {subRefreshing ? "更新中" : "刷新订阅"}
+                      </button>
+                    </div>
+                  </div>
+                  {subError && <p className="text-sm text-destructive mb-2">{subError}</p>}
+                  <input
+                    type="text"
+                    placeholder="订阅链接"
+                    className="w-full px-3 py-2 bg-secondary/40 rounded-lg text-sm font-mono text-muted-foreground"
+                    defaultValue={status?.subscription?.url || ""}
+                    readOnly
+                  />
+                </div>
+
+                {groups
+                  .filter((g) => g.name !== "GLOBAL")
+                  .map((group) => {
+                    const isExpanded = expandedGroups.has(group.name)
+                    return (
+                      <div key={group.name} className="card-premium overflow-hidden">
+                        <button
+                          onClick={() => {
+                            const next = new Set(expandedGroups)
+                            if (next.has(group.name)) next.delete(group.name)
+                            else next.add(group.name)
+                            setExpandedGroups(next)
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/20 transition-colors"
+                        >
+                          <ChevronDown
+                            className={cn(
+                              "w-4 h-4 text-muted-foreground shrink-0 transition-transform duration-200",
+                              !isExpanded && "-rotate-90"
+                            )}
+                            strokeWidth={1.5}
+                          />
+                          <span className="text-sm font-semibold">{group.name}</span>
+                          <span className="text-xs text-muted-foreground font-mono bg-secondary/50 px-2 py-0.5 rounded-md">
+                            {group.type}
+                          </span>
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {group.now}
+                          </span>
+                        </button>
+
+                        {isExpanded && (
+                          <div className="px-4 pb-4">
+                            <div className="flex flex-wrap gap-2">
+                              {group.members.map((node) => {
+                                const isActive = group.now === node.name
+                                return (
+                                  <button
+                                    key={`${group.name}::${node.name}`}
+                                    onClick={() => handleProviderNodeSwitch(group.name, node.name)}
+                                    className={cn("node-chip", isActive && "active")}
+                                    title={node.name}
+                                  >
+                                    <span className="truncate max-w-[120px]">{node.name}</span>
+                                    {node.delay !== null && node.delay > 0 ? (
+                                      <span className={cn(
+                                        "text-xs font-mono tabular-nums opacity-80",
+                                        node.delay < 100 ? "text-emerald-400" : node.delay < 200 ? "text-amber-400" : "text-red-400"
+                                      )}>
+                                        {node.delay}ms
+                                      </span>
+                                    ) : (
+                                      <span className="text-xs font-mono opacity-50">--</span>
+                                    )}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+              </div>
+            )}
+          </div>
+
+          {/* ── 3. Node Selector ── */}
+          <div id="node-selector" className="flex-1">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="section-header">节点选择</h3>
+              <button
+                onClick={async () => {
+                  setIsRefreshing(true)
+                  try {
+                    const res = await fetch("/api/mihomo/test/group/GLOBAL?timeout=3000")
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+                    await fetchNodes()
+                  } catch (err) {
+                    console.error("Latency refresh failed:", err)
+                  } finally {
+                    setIsRefreshing(false)
+                  }
+                }}
+                disabled={isRefreshing || nodesLoading}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                <RefreshCw className={cn("w-3 h-3", isRefreshing && "animate-spin")} strokeWidth={1.5} />
+                {isRefreshing ? "测速中" : "刷新延迟"}
+              </button>
+            </div>
+
             {nodesLoading ? (
               <p className="text-sm text-muted-foreground px-1">加载节点中...</p>
             ) : nodesError ? (
               <p className="text-sm text-destructive px-1">{nodesError}</p>
-            ) : groups.length === 0 ? (
-              <p className="text-sm text-muted-foreground px-1">暂无节点</p>
+            ) : flatNodes.length === 0 ? (
+              <p className="text-sm text-muted-foreground px-1">暂无可用节点</p>
             ) : (
               <div className="flex flex-col gap-3">
-                {groups.map((group) => {
-                  const isExpanded = expandedGroups.has(group.name)
+                {nodesByContinent.map(({ continent, nodes }) => {
+                  const isExpanded = expandedContinents.has(continent)
                   return (
-                    <div key={group.name} className="card-premium overflow-hidden">
-                      {/* Group header */}
+                    <div key={continent} className="card-premium overflow-hidden">
                       <button
                         onClick={() => {
-                          const next = new Set(expandedGroups)
-                          if (next.has(group.name)) next.delete(group.name)
-                          else next.add(group.name)
-                          setExpandedGroups(next)
+                          const next = new Set(expandedContinents)
+                          if (next.has(continent)) next.delete(continent)
+                          else next.add(continent)
+                          setExpandedContinents(next)
                         }}
                         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/20 transition-colors"
                       >
-                        <ChevronDown className={cn(
-                          "w-4 h-4 text-muted-foreground shrink-0 transition-transform duration-200",
-                          !isExpanded && "-rotate-90"
-                        )} strokeWidth={1.5} />
-                        <span className="text-sm font-semibold">{group.name}</span>
+                        <ChevronDown
+                          className={cn(
+                            "w-4 h-4 text-muted-foreground shrink-0 transition-transform duration-200",
+                            !isExpanded && "-rotate-90"
+                          )}
+                          strokeWidth={1.5}
+                        />
+                        <span className="text-sm font-semibold">{continent}</span>
                         <span className="text-xs text-muted-foreground font-mono bg-secondary/50 px-2 py-0.5 rounded-md">
-                          {group.type}
-                        </span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {group.now}
+                          {nodes.length}
                         </span>
                       </button>
 
-                      {/* Expanded node list — horizontal chips */}
                       {isExpanded && (
                         <div className="px-4 pb-4">
                           <div className="flex flex-wrap gap-2">
-                            {group.members.map((node) => {
-                              const isActive = group.now === node.name
+                            {nodes.map((node) => {
+                              const isActive = globalGroup?.now === node.name
+                              const delay = node.delay || 0
                               return (
                                 <button
-                                  key={`${group.name}::${node.name}`}
-                                  onClick={() => handleNodeSwitch(group.name, node.name)}
+                                  key={node.name}
+                                  onClick={() => handleNodeSwitch(node.name)}
                                   className={cn("node-chip", isActive && "active")}
+                                  title={node.name}
                                 >
-                                  <span className="truncate max-w-[120px]">{node.name}</span>
-                                  {node.delay !== null && node.delay > 0 ? (
+                                  <span className="truncate max-w-[140px]">{node.name}</span>
+                                  {delay > 0 ? (
                                     <span className={cn(
                                       "text-xs font-mono tabular-nums opacity-80",
-                                      node.delay < 100 ? "text-emerald-400" : node.delay < 200 ? "text-amber-400" : "text-red-400"
+                                      delay < 100 ? "text-emerald-400" : delay < 200 ? "text-amber-400" : "text-red-400"
                                     )}>
-                                      {node.delay}ms
+                                      {delay}ms
                                     </span>
                                   ) : (
                                     <span className="text-xs font-mono opacity-50">--</span>
@@ -584,9 +795,6 @@ export function NetworkHub() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium font-mono">{client.ip}</span>
-                          {clientNames[client.ip] && (
-                            <span className="text-sm text-muted-foreground">({clientNames[client.ip]})</span>
-                          )}
                           <span className="text-xs text-muted-foreground">{client.connections} 连接</span>
                         </div>
                         <div className="flex items-center gap-3 mt-0.5">
@@ -609,6 +817,10 @@ export function NetworkHub() {
                 </div>
               )}
             </div>
+          </div>
+          {/* ── 6. Chain Log ── */}
+          <div>
+            <ChainLog />
           </div>
         </div>
       )}
