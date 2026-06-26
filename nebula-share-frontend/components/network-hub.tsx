@@ -163,6 +163,10 @@ export function NetworkHub() {
   const [subInfo, setSubInfo] = useState<{ lastUpdate: string; proxyCount: number } | null>(null)
   const [clients, setClients] = useState<ClientInfo[]>([])
   const [clientsLoading, setClientsLoading] = useState(false)
+  const [clientNames, setClientNames] = useState<Record<string, string>>({})
+  const [editingClientIp, setEditingClientIp] = useState<string | null>(null)
+  const [editName, setEditName] = useState("")
+  const [saveNameError, setSaveNameError] = useState<string | null>(null)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
   const fetchStatus = useCallback(async () => {
@@ -246,16 +250,48 @@ export function NetworkHub() {
     }
   }, [])
 
+  const fetchClientNames = useCallback(async () => {
+    try {
+      const res = await fetch("/api/clients/names")
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.ok) throw new Error("Backend returned ok: false")
+      setClientNames(data.names || {})
+    } catch (err) {
+      console.error("Failed to fetch client names:", err)
+    }
+  }, [])
+
+  const saveClientName = useCallback(async (ip: string, name: string) => {
+    setSaveNameError(null)
+    try {
+      const res = await fetch("/api/clients/names", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ip, name: name.trim() }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.ok) throw new Error(data.error || "save failed")
+      setClientNames(data.names || {})
+      setEditingClientIp(null)
+      setEditName("")
+    } catch (err) {
+      setSaveNameError(err instanceof Error ? err.message : "保存失败")
+    }
+  }, [])
+
   useEffect(() => {
     if (activeTab === "gateway") {
       fetchStatus()
       fetchNodes()
       fetchClients()
+      fetchClientNames()
       // Poll clients every 3s
       const interval = setInterval(fetchClients, 3000)
       return () => clearInterval(interval)
     }
-  }, [activeTab, fetchStatus, fetchNodes, fetchClients])
+  }, [activeTab, fetchStatus, fetchNodes, fetchClients, fetchClientNames])
 
   useEffect(() => {
     if (activeTab === "monitor") {
