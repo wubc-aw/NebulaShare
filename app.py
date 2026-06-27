@@ -551,10 +551,14 @@ def load_mihomo_state():
     if os.path.isfile(MIHOMO_STATE_FILE):
         try:
             with open(MIHOMO_STATE_FILE) as f:
-                return json.load(f)
+                state = json.load(f)
         except Exception:
-            return {}
-    return {}
+            state = {}
+    else:
+        state = {}
+    state.setdefault("client_names", {})
+    state.setdefault("client_route_overrides", {})
+    return state
 
 
 def save_mihomo_state(d):
