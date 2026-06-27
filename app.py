@@ -588,6 +588,23 @@ def _inject_client_overrides(config, overrides):
     return config
 
 
+def _apply_mihomo_config(config):
+    """备份、写入、热重载 mihomo 配置；失败则回滚。"""
+    path = MIHOMO_CONFIG
+    backup_path = f"{path}.bak.{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    shutil.copy2(path, backup_path)
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
+        try:
+            mihomo_put("/configs/reload", {})
+        except Exception:
+            mihomo_put("/configs", {})
+    except Exception:
+        shutil.copy2(backup_path, path)
+        raise
+
+
 def mask_url(u):
     """Hide token-like query params for display."""
     if not u:
