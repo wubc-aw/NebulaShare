@@ -759,8 +759,8 @@ export function NetworkHub() {
                           <span className="text-sm font-mono font-semibold">{client.ip.split('.').pop()}</span>
                         </div>
                         <div className="min-w-0">
-                          <p className="text-sm font-medium font-mono truncate">{client.ip}</p>
-                          {displayName && <p className="text-xs text-muted-foreground truncate">{displayName}</p>}
+                          <p className="text-sm font-semibold truncate">{displayName || client.ip}</p>
+                          {displayName && <p className="text-xs text-muted-foreground font-mono truncate">{client.ip}</p>}
                         </div>
                       </div>
                       <div className="flex items-center justify-between">

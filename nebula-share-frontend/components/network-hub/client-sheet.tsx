@@ -116,8 +116,8 @@ export function ClientSheet({
               <span className="text-sm font-mono font-semibold">{ip.split('.').pop()}</span>
             </div>
             <div>
-              <p className="text-base font-semibold font-mono">{ip}</p>
-              {clientName && <p className="text-sm text-muted-foreground">{clientName}</p>}
+              <p className="text-base font-semibold truncate">{clientName || ip}</p>
+              {clientName && <p className="text-sm text-muted-foreground font-mono">{ip}</p>}
             </div>
           </div>
           <button
