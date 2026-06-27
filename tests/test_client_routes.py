@@ -54,34 +54,33 @@ def test_inject_client_overrides_removes_old_and_rules():
     assert result['rules'][0] == 'AND,((SRC-IP-CIDR,192.168.50.141/32),(DOMAIN-SUFFIX,plex.tv)),AI'
 
 
-def test_apply_mihomo_config_backup_and_writes():
-    with tempfile.TemporaryDirectory() as tmp:
-        config_path = Path(tmp) / 'config.yaml'
-        config_path.write_text('rules:\n  - MATCH,Final\n', encoding='utf-8')
-        config = {'rules': ['AND,((SRC-IP-CIDR,192.168.50.141/32),(DOMAIN-SUFFIX,plex.tv)),AI', 'MATCH,Final']}
-        with patch('app.MIHOMO_CONFIG', str(config_path)):
-            with patch('app.mihomo_put') as mock_put:
-                from app import _apply_mihomo_config
-                _apply_mihomo_config(config)
-                text = config_path.read_text(encoding='utf-8')
-                assert 'DOMAIN-SUFFIX,plex.tv' in text
-                backups = list(Path(tmp).glob('config.yaml.bak.*'))
-                assert len(backups) == 1
-                assert 'MATCH,Final' in backups[0].read_text(encoding='utf-8')
-                mock_put.assert_called_once()
+def test_apply_mihomo_config_backup_install_restart():
+    from app import _apply_mihomo_config
+    config = {'rules': ['AND,((SRC-IP-CIDR,192.168.50.141/32),(DOMAIN-SUFFIX,plex.tv)),AI', 'MATCH,Final']}
+    with patch('app.subprocess.run') as mock_run:
+        mock_run.return_value = type('R', (), {'returncode': 0, 'stderr': ''})()
+        _apply_mihomo_config(config)
+        calls = mock_run.call_args_list
+        assert calls[0][0][0][:3] == ['sudo', '-n', 'cp']
+        assert calls[1][0][0][:3] == ['sudo', '-n', 'install']
+        assert calls[2][0][0][:3] == ['sudo', '-n', 'systemctl']
 
 
-def test_apply_mihomo_config_rollback_on_failure():
-    with tempfile.TemporaryDirectory() as tmp:
-        config_path = Path(tmp) / 'config.yaml'
-        original = 'rules:\n  - MATCH,Final\n'
-        config_path.write_text(original, encoding='utf-8')
-        config = {'rules': ['AND,((SRC-IP-CIDR,192.168.50.141/32),(DOMAIN-SUFFIX,plex.tv)),AI', 'MATCH,Final']}
-        with patch('app.MIHOMO_CONFIG', str(config_path)):
-            with patch('app.mihomo_put', side_effect=RuntimeError('reload failed')):
-                from app import _apply_mihomo_config
-                try:
-                    _apply_mihomo_config(config)
-                except RuntimeError:
-                    pass
-                assert config_path.read_text(encoding='utf-8') == original
+def test_apply_mihomo_config_rollback_on_restart_failure():
+    from app import _apply_mihomo_config
+    config = {'rules': ['AND,((SRC-IP-CIDR,192.168.50.141/32),(DOMAIN-SUFFIX,plex.tv)),AI', 'MATCH,Final']}
+
+    def side_effect(cmd, **kwargs):
+        if 'systemctl' in cmd:
+            return type('R', (), {'returncode': 1, 'stderr': 'restart failed'})()
+        return type('R', (), {'returncode': 0, 'stderr': ''})()
+
+    with patch('app.subprocess.run') as mock_run:
+        mock_run.side_effect = side_effect
+        try:
+            _apply_mihomo_config(config)
+        except RuntimeError as e:
+            assert 'restart failed' in str(e)
+        calls = mock_run.call_args_list
+        assert len(calls) == 4
+        assert calls[3][0][0][:3] == ['sudo', '-n', 'cp']  # rollback

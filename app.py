@@ -589,20 +589,46 @@ def _inject_client_overrides(config, overrides):
 
 
 def _apply_mihomo_config(config):
-    """备份、写入、热重载 mihomo 配置；失败则回滚。"""
-    path = MIHOMO_CONFIG
-    backup_path = f"{path}.bak.{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    shutil.copy2(path, backup_path)
+    """渲染配置到临时文件，sudo 备份/写入/重启；失败则回滚。
+
+    与 _replace_mihomo_config 保持一致：使用 sudo -n 操作 root 拥有的配置文件。
+    """
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
-        try:
-            mihomo_put("/configs/reload", {})
-        except Exception:
-            mihomo_put("/configs", {})
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".yaml",
+                                         dir="/tmp", encoding='utf-8') as tmp:
+            yaml.safe_dump(config, tmp, allow_unicode=True, sort_keys=False,
+                           default_flow_style=False)
+            tmp_path = tmp.name
+    except Exception as e:
+        raise RuntimeError(f"render yaml failed: {e}")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak = f"{MIHOMO_CONFIG}.bak.{ts}"
+    installed = False
+    try:
+        r1 = subprocess.run(["sudo", "-n", "cp", "--preserve=mode,ownership", MIHOMO_CONFIG, bak],
+                            capture_output=True, text=True, timeout=10)
+        if r1.returncode != 0:
+            raise RuntimeError(f"backup failed: {r1.stderr.strip()}")
+        r2 = subprocess.run(["sudo", "-n", "install", "-m", "0644", tmp_path, MIHOMO_CONFIG],
+                            capture_output=True, text=True, timeout=10)
+        if r2.returncode != 0:
+            raise RuntimeError(f"install failed: {r2.stderr.strip()}")
+        installed = True
+        r3 = subprocess.run(["sudo", "-n", "systemctl", "restart", MIHOMO_SERVICE],
+                            capture_output=True, text=True, timeout=20)
+        if r3.returncode != 0:
+            raise RuntimeError(f"restart failed: {r3.stderr.strip()}")
     except Exception:
-        shutil.copy2(backup_path, path)
+        if installed:
+            subprocess.run(["sudo", "-n", "cp", "--preserve=mode,ownership", bak, MIHOMO_CONFIG],
+                           capture_output=True, text=True, timeout=10)
         raise
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 def mask_url(u):
@@ -909,6 +935,40 @@ def client_routes():
     clients_out.sort(key=lambda x: -x["connections"])
 
     return jsonify({"ok": True, "clients": clients_out, "global_rules": global_rules})
+
+
+@app.route("/api/clients/routes", methods=["POST"])
+def client_routes_post():
+    body = request.get_json(silent=True) or {}
+    ip = (body.get("ip") or "").strip()
+    overrides = body.get("overrides") or {}
+
+    if not ip:
+        return jsonify({"ok": False, "error": "ip required"}), 400
+    if not isinstance(overrides, dict):
+        return jsonify({"ok": False, "error": "overrides must be an object"}), 400
+
+    for pattern, target in overrides.items():
+        if not pattern or not isinstance(target, str) or not target.strip():
+            return jsonify({"ok": False, "error": f"invalid override for {pattern}"}), 400
+
+    state = load_mihomo_state()
+    state.setdefault("client_route_overrides", {})
+    if overrides:
+        state["client_route_overrides"][ip] = overrides
+    else:
+        state["client_route_overrides"].pop(ip, None)
+    save_mihomo_state(state)
+
+    try:
+        with open(MIHOMO_CONFIG, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+        config = _inject_client_overrides(config, state["client_route_overrides"])
+        _apply_mihomo_config(config)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    return jsonify({"ok": True})
 
 
 @app.route("/api/mihomo/groups")
