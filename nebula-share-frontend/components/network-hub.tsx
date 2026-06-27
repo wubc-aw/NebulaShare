@@ -14,9 +14,7 @@ import {
   ChevronDown,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { classifyRegion, CONTINENT_ORDER } from "@/lib/proxy-regions"
-import { ChainLog } from "./network-hub/chain-log"
-import { ClientRoutes } from "./network-hub/client-routes"
+import { ClientSheet } from "./network-hub/client-sheet"
 
 interface ProxyNode {
   name: string
@@ -153,11 +151,18 @@ function formatDuration(seconds: number): string {
   return `${m}m`
 }
 
+function getNodeColor(name: string) {
+  if (name.includes("DIRECT")) return "text-success"
+  if (name.includes("🇭🇰")) return "text-amber-400"
+  if (name.includes("🇸🇬")) return "text-emerald-400"
+  if (name.includes("🇺🇸")) return "text-blue-400"
+  return "text-primary"
+}
+
 export function NetworkHub() {
   const [activeTab, setActiveTab] = useState<"gateway" | "monitor" | "speed">("gateway")
   const [gatewayEnabled, setGatewayEnabled] = useState(true)
   const [routingMode, setRoutingMode] = useState<"rule" | "global" | "direct">("rule")
-  const [selectedNode, setSelectedNode] = useState("")
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [groups, setGroups] = useState<ProxyGroup[]>([])
   const [nodesLoading, setNodesLoading] = useState(false)
@@ -179,8 +184,10 @@ export function NetworkHub() {
   const [editName, setEditName] = useState("")
   const [saveNameError, setSaveNameError] = useState<string | null>(null)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
-  const [expandedContinents, setExpandedContinents] = useState<Set<string>>(new Set(CONTINENT_ORDER))
   const [providerConfigExpanded, setProviderConfigExpanded] = useState(false)
+  const [clientSheetOpen, setClientSheetOpen] = useState(false)
+  const [selectedClientIp, setSelectedClientIp] = useState<string | null>(null)
+  const [clientChainLog, setClientChainLog] = useState<any[]>([])
 
   const fetchStatus = useCallback(async () => {
     setStatusLoading(true)
@@ -212,19 +219,12 @@ export function NetworkHub() {
       const data = await res.json()
       if (!data.ok) throw new Error("Backend returned ok: false")
       setGroups(data.groups || [])
-      // Set selected node from first group's current selection
-      if (data.groups && data.groups.length > 0 && !selectedNode) {
-        const firstGroup = data.groups[0]
-        if (firstGroup.now) {
-          setSelectedNode(`${firstGroup.name}::${firstGroup.now}`)
-        }
-      }
     } catch (err) {
       setNodesError(err instanceof Error ? err.message : "Failed to fetch nodes")
     } finally {
       setNodesLoading(false)
     }
-  }, [selectedNode])
+  }, [])
 
   const fetchReach = useCallback(async () => {
     setReachLoading(true)
@@ -305,6 +305,30 @@ export function NetworkHub() {
     }
   }, [fetchClientRoutes, fetchClients])
 
+  const fetchClientChainLog = useCallback(async (ip: string) => {
+    try {
+      const res = await fetch(`/api/mihomo/connections/recent?ip=${encodeURIComponent(ip)}&limit=50`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.ok) throw new Error("Backend returned ok: false")
+      setClientChainLog(data.items || [])
+    } catch (err) {
+      console.error("Failed to fetch client chain log:", err)
+    }
+  }, [])
+
+  const openClientSheet = useCallback((ip: string) => {
+    setSelectedClientIp(ip)
+    setClientSheetOpen(true)
+    fetchClientChainLog(ip)
+  }, [fetchClientChainLog])
+
+  const closeClientSheet = useCallback(() => {
+    setClientSheetOpen(false)
+    setSelectedClientIp(null)
+    setClientChainLog([])
+  }, [])
+
   const saveClientName = useCallback(async (ip: string, name: string) => {
     setSaveNameError(null)
     try {
@@ -350,44 +374,6 @@ export function NetworkHub() {
     setIsRefreshing(true)
     await Promise.all([fetchStatus(), fetchNodes(), fetchClients()])
     setIsRefreshing(false)
-  }
-
-  const handleNodeSwitch = async (nodeName: string) => {
-    const groupName = "GLOBAL"
-    const targetMode: "rule" | "global" = routingMode === "global" ? "global" : "rule"
-
-    // If currently direct, switch to rule first so the node actually takes effect
-    if (gatewayEnabled && routingMode === "direct") {
-      setRoutingMode(targetMode)
-      try {
-        const modeRes = await fetch("/api/mihomo/mode", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: targetMode }),
-        })
-        if (!modeRes.ok) throw new Error(`HTTP ${modeRes.status}`)
-        const modeData = await modeRes.json()
-        if (!modeData.ok) throw new Error("Mode switch failed")
-      } catch (err) {
-        console.error("Mode switch failed:", err)
-      }
-    }
-
-    setSelectedNode(`${groupName}::${nodeName}`)
-    try {
-      const res = await fetch("/api/mihomo/select", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ group: groupName, name: nodeName }),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
-      if (!data.ok) throw new Error("Switch failed")
-      await fetchNodes()
-      await fetchStatus()
-    } catch (err) {
-      console.error("Node switch failed:", err)
-    }
   }
 
   const handleProviderNodeSwitch = async (groupName: string, nodeName: string) => {
@@ -454,23 +440,12 @@ export function NetworkHub() {
     ? "直连"
     : globalGroup?.now || "未选择"
 
-  const GROUP_TYPES = new Set(["Selector", "URLTest", "Fallback", "LoadBalance", "Direct", "Reject"])
-
-  const flatNodes = groups
-    .flatMap((g) => g.members)
-    .filter((m) => m.name && !GROUP_TYPES.has(m.type || ""))
-    .reduce<ProxyNode[]>((acc, node) => {
-      if (!acc.some((n) => n.name === node.name)) {
-        acc.push(node)
-      }
-      return acc
-    }, [])
-    .sort((a, b) => a.name.localeCompare(b.name))
-
-  const nodesByContinent = CONTINENT_ORDER.map((continent) => ({
-    continent,
-    nodes: flatNodes.filter((n) => classifyRegion(n.name) === continent),
-  })).filter((c) => c.nodes.length > 0)
+  const selectedClient = selectedClientIp
+    ? clients.find((c) => c.ip === selectedClientIp) || null
+    : null
+  const selectedClientRoute = selectedClientIp
+    ? clientRoutes?.clients.find((c) => c.ip === selectedClientIp) || null
+    : null
 
   return (
     <div className="h-full flex flex-col">
@@ -689,105 +664,9 @@ export function NetworkHub() {
             )}
           </div>
 
-          {/* ── 3. Node Selector ── */}
-          <div id="node-selector" className="flex-1">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="section-header">节点选择</h3>
-              <button
-                onClick={async () => {
-                  setIsRefreshing(true)
-                  try {
-                    const res = await fetch("/api/mihomo/test/group/GLOBAL?timeout=3000")
-                    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-                    await fetchNodes()
-                  } catch (err) {
-                    console.error("Latency refresh failed:", err)
-                  } finally {
-                    setIsRefreshing(false)
-                  }
-                }}
-                disabled={isRefreshing || nodesLoading}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
-              >
-                <RefreshCw className={cn("w-3 h-3", isRefreshing && "animate-spin")} strokeWidth={1.5} />
-                {isRefreshing ? "测速中" : "刷新延迟"}
-              </button>
-            </div>
-
-            {nodesLoading ? (
-              <p className="text-sm text-muted-foreground px-1">加载节点中...</p>
-            ) : nodesError ? (
-              <p className="text-sm text-destructive px-1">{nodesError}</p>
-            ) : flatNodes.length === 0 ? (
-              <p className="text-sm text-muted-foreground px-1">暂无可用节点</p>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {nodesByContinent.map(({ continent, nodes }) => {
-                  const isExpanded = expandedContinents.has(continent)
-                  return (
-                    <div key={continent} className="card-premium overflow-hidden">
-                      <button
-                        onClick={() => {
-                          const next = new Set(expandedContinents)
-                          if (next.has(continent)) next.delete(continent)
-                          else next.add(continent)
-                          setExpandedContinents(next)
-                        }}
-                        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/20 transition-colors"
-                      >
-                        <ChevronDown
-                          className={cn(
-                            "w-4 h-4 text-muted-foreground shrink-0 transition-transform duration-200",
-                            !isExpanded && "-rotate-90"
-                          )}
-                          strokeWidth={1.5}
-                        />
-                        <span className="text-sm font-semibold">{continent}</span>
-                        <span className="text-xs text-muted-foreground font-mono bg-secondary/50 px-2 py-0.5 rounded-md">
-                          {nodes.length}
-                        </span>
-                      </button>
-
-                      {isExpanded && (
-                        <div className="px-4 pb-4">
-                          <div className="flex flex-wrap gap-2">
-                            {nodes.map((node) => {
-                              const isActive = globalGroup?.now === node.name
-                              const delay = node.delay || 0
-                              return (
-                                <button
-                                  key={node.name}
-                                  onClick={() => handleNodeSwitch(node.name)}
-                                  className={cn("node-chip", isActive && "active")}
-                                  title={node.name}
-                                >
-                                  <span className="truncate max-w-[140px]">{node.name}</span>
-                                  {delay > 0 ? (
-                                    <span className={cn(
-                                      "text-xs font-mono tabular-nums opacity-80",
-                                      delay < 100 ? "text-emerald-400" : delay < 200 ? "text-amber-400" : "text-red-400"
-                                    )}>
-                                      {delay}ms
-                                    </span>
-                                  ) : (
-                                    <span className="text-xs font-mono opacity-50">--</span>
-                                  )}
-                                </button>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* ── 4. Routing Mode ── */}
+          {/* ── 3. Routing Mode ── */}
           <div>
-            <h3 className="section-header">路由</h3>
+            <h3 className="section-header">路由模式</h3>
             <div className="card-premium p-1">
               <div className="flex items-center gap-1">
                 {(["rule", "global", "direct"] as const).map((mode) => (
@@ -810,64 +689,105 @@ export function NetworkHub() {
             </div>
           </div>
 
-          {/* ── 5. Client Routes ── */}
+          {/* ── 4. Provider Rule Config ── */}
           <div>
-            <ClientRoutes
-              clients={clients}
-              groups={groups}
-              routesData={clientRoutes}
-              onSave={saveClientRoutes}
-            />
+            <button
+              onClick={() => setProviderConfigExpanded((v) => !v)}
+              className="w-full flex items-center justify-between mb-3 group"
+            >
+              <h3 className="section-header mb-0">运营商规则配置</h3>
+              <ChevronDown
+                className={cn(
+                  "w-4 h-4 text-muted-foreground transition-transform duration-200",
+                  providerConfigExpanded && "rotate-180"
+                )}
+                strokeWidth={1.5}
+              />
+            </button>
+
+            {providerConfigExpanded && (
+              <div className="card-premium p-4">
+                {groups.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">加载中...</p>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {groups.map((group) => (
+                      <div
+                        key={group.name}
+                        className="flex items-center justify-between px-3 py-2 rounded-xl bg-secondary/20"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold">{group.name}</span>
+                          <span className="text-xs text-muted-foreground font-mono bg-secondary/50 px-2 py-0.5 rounded-md">
+                            {group.type}
+                          </span>
+                        </div>
+                        <span className="text-sm font-mono text-primary">{group.now}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* ── 6. Client Monitor ── */}
+          {/* ── 5. Active Clients ── */}
           <div>
-            <h3 className="section-header">客户端</h3>
-            <div className="card-premium p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="section-header">活动客户端</h3>
+              <span className="text-xs text-muted-foreground font-mono bg-secondary/50 px-2 py-0.5 rounded-md">
+                {clients.length}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {clientsLoading && clients.length === 0 ? (
                 <p className="text-sm text-muted-foreground">加载中...</p>
               ) : clients.length === 0 ? (
                 <p className="text-sm text-muted-foreground">暂无活动客户端</p>
               ) : (
-                <div className="flex flex-col gap-2">
-                  {clients.map((client) => (
-                    <div
+                clients.map((client) => {
+                  const route = clientRoutes?.clients.find((c) => c.ip === client.ip)
+                  const displayName = clientNames[client.ip]
+                  return (
+                    <button
                       key={client.ip}
-                      className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-secondary/20"
+                      onClick={() => openClientSheet(client.ip)}
+                      className="card-premium p-4 text-left hover:shadow-md transition-shadow"
                     >
-                      <div className="w-8 h-8 rounded-lg bg-secondary/50 flex items-center justify-center shrink-0">
-                        <span className="text-xs font-mono font-semibold">{client.ip.split('.').pop()}</span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium font-mono">{client.ip}</span>
-                          <span className="text-xs text-muted-foreground">{client.connections} 连接</span>
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-10 h-10 rounded-lg bg-secondary/50 flex items-center justify-center shrink-0">
+                          <span className="text-sm font-mono font-semibold">{client.ip.split('.').pop()}</span>
                         </div>
-                        <div className="flex items-center gap-3 mt-0.5">
-                          <span className="text-xs text-muted-foreground font-mono">
-                            ↑ {formatBytesPerSec(client.upload_rate)}
-                          </span>
-                          <span className="text-xs text-muted-foreground font-mono">
-                            ↓ {formatBytesPerSec(client.download_rate)}
-                          </span>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium font-mono truncate">{client.ip}</p>
+                          {displayName && <p className="text-xs text-muted-foreground truncate">{displayName}</p>}
                         </div>
                       </div>
-                      <span className={cn(
-                        "text-xs px-2 py-0.5 rounded-full font-medium shrink-0",
-                        client.chain.includes("DIRECT") ? "bg-success/10 text-success" : "bg-primary/10 text-primary"
-                      )}>
-                        {client.chain.includes("DIRECT") ? "直连" : "代理"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                      <div className="flex items-center justify-between">
+                        <span className={cn("text-xs font-mono", getNodeColor(route?.primary_node || ""))}>
+                          {route?.primary_node || "-"}
+                        </span>
+                        <span className="text-xs text-muted-foreground">{client.connections} 连接</span>
+                      </div>
+                    </button>
+                  )
+                })
               )}
             </div>
           </div>
-          {/* ── 6. Chain Log ── */}
-          <div>
-            <ChainLog />
-          </div>
+
+          <ClientSheet
+            ip={selectedClientIp}
+            isOpen={clientSheetOpen}
+            onClose={closeClientSheet}
+            client={selectedClient}
+            clientName={selectedClientIp ? clientNames[selectedClientIp] : undefined}
+            route={selectedClientRoute}
+            groups={groups}
+            globalRules={clientRoutes?.global_rules || []}
+            chainLog={clientChainLog}
+            onSave={saveClientRoutes}
+          />
         </div>
       )}
 
