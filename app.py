@@ -568,6 +568,26 @@ def save_mihomo_state(d):
     os.replace(tmp, MIHOMO_STATE_FILE)
 
 
+def _inject_client_overrides(config, overrides):
+    """把 client_route_overrides 转成 AND 逻辑规则，插到 rules 最前面。
+
+    overrides: { ip: { pattern: target_group, ... }, ... }
+    """
+    rules = config.get("rules") or []
+    cleaned = [
+        r for r in rules
+        if not (isinstance(r, str) and r.startswith("AND,((SRC-IP-CIDR,"))
+    ]
+    injected = []
+    for ip, patterns in overrides.items():
+        for pattern, target in patterns.items():
+            injected.append(
+                f"AND,((SRC-IP-CIDR,{ip}/32),(DOMAIN-SUFFIX,{pattern})),{target}"
+            )
+    config["rules"] = injected + cleaned
+    return config
+
+
 def mask_url(u):
     """Hide token-like query params for display."""
     if not u:
