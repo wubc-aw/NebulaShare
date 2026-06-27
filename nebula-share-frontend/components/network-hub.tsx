@@ -16,6 +16,7 @@ import {
 import { cn } from "@/lib/utils"
 import { classifyRegion, CONTINENT_ORDER } from "@/lib/proxy-regions"
 import { ChainLog } from "./network-hub/chain-log"
+import { ClientRoutes } from "./network-hub/client-routes"
 
 interface ProxyNode {
   name: string
@@ -172,6 +173,7 @@ export function NetworkHub() {
   const [subInfo, setSubInfo] = useState<{ lastUpdate: string; proxyCount: number } | null>(null)
   const [clients, setClients] = useState<ClientInfo[]>([])
   const [clientsLoading, setClientsLoading] = useState(false)
+  const [clientRoutes, setClientRoutes] = useState<{ clients: any[]; global_rules: any[] } | null>(null)
   const [clientNames, setClientNames] = useState<Record<string, string>>({})
   const [editingClientIp, setEditingClientIp] = useState<string | null>(null)
   const [editName, setEditName] = useState("")
@@ -273,6 +275,36 @@ export function NetworkHub() {
     }
   }, [])
 
+  const fetchClientRoutes = useCallback(async () => {
+    try {
+      const res = await fetch("/api/clients/routes")
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.ok) throw new Error("Backend returned ok: false")
+      setClientRoutes(data)
+    } catch (err) {
+      console.error("Failed to fetch client routes:", err)
+    }
+  }, [])
+
+  const saveClientRoutes = useCallback(async (ip: string, overrides: Record<string, string>) => {
+    try {
+      const res = await fetch("/api/clients/routes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ip, overrides }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.ok) throw new Error(data.error || "save failed")
+      await fetchClientRoutes()
+      await fetchClients()
+    } catch (err) {
+      console.error("Failed to save client routes:", err)
+      alert("保存失败: " + (err instanceof Error ? err.message : "未知错误"))
+    }
+  }, [fetchClientRoutes, fetchClients])
+
   const saveClientName = useCallback(async (ip: string, name: string) => {
     setSaveNameError(null)
     try {
@@ -298,11 +330,15 @@ export function NetworkHub() {
       fetchNodes()
       fetchClients()
       fetchClientNames()
-      // Poll clients every 3s
-      const interval = setInterval(fetchClients, 3000)
+      fetchClientRoutes()
+      // Poll clients and routes every 3s
+      const interval = setInterval(() => {
+        fetchClients()
+        fetchClientRoutes()
+      }, 3000)
       return () => clearInterval(interval)
     }
-  }, [activeTab, fetchStatus, fetchNodes, fetchClients, fetchClientNames])
+  }, [activeTab, fetchStatus, fetchNodes, fetchClients, fetchClientNames, fetchClientRoutes])
 
   useEffect(() => {
     if (activeTab === "monitor") {
@@ -774,7 +810,17 @@ export function NetworkHub() {
             </div>
           </div>
 
-          {/* ── 5. Client Monitor ── */}
+          {/* ── 5. Client Routes ── */}
+          <div>
+            <ClientRoutes
+              clients={clients}
+              groups={groups}
+              routesData={clientRoutes}
+              onSave={saveClientRoutes}
+            />
+          </div>
+
+          {/* ── 6. Client Monitor ── */}
           <div>
             <h3 className="section-header">客户端</h3>
             <div className="card-premium p-4">
