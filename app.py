@@ -852,6 +852,65 @@ def clients_names_post():
     return jsonify({"ok": True, "names": client_names})
 
 
+@app.route("/api/clients/routes")
+def client_routes():
+    """Return per-client routing view: current chains, global rules, and overrides."""
+    snap = mihomo_get("/connections", timeout=3)
+    conns = (snap or {}).get("connections") or []
+
+    meta_by_ip = {}
+    for c in conns:
+        meta = c.get("metadata") or {}
+        ip = meta.get("sourceIP") or "?"
+        e = meta_by_ip.setdefault(ip, {
+            "count": 0, "rules": {}, "chains": {}, "host_recent": "",
+        })
+        e["count"] += 1
+        rk = c.get("rule") or "?"
+        e["rules"][rk] = e["rules"].get(rk, 0) + 1
+        ch = " -> ".join(reversed(c.get("chains") or [])) or "DIRECT"
+        e["chains"][ch] = e["chains"].get(ch, 0) + 1
+        host = meta.get("host") or meta.get("destinationIP") or ""
+        if host and not e["host_recent"]:
+            e["host_recent"] = host
+
+    state = load_mihomo_state()
+    overrides = state.get("client_route_overrides") or {}
+    names = state.get("client_names") or {}
+
+    proxies_data = mihomo_get("/proxies", timeout=4) or {}
+    proxies = proxies_data.get("proxies") or {}
+    global_rules = []
+    for name, v in proxies.items():
+        t = v.get("type")
+        if t not in ("Selector", "URLTest", "Fallback", "LoadBalance"):
+            continue
+        global_rules.append({
+            "name": name,
+            "type": t,
+            "target": v.get("now") or "-",
+        })
+
+    clients_out = []
+    for ip in set(meta_by_ip.keys()):
+        m = meta_by_ip[ip]
+        top_chain = max(m["chains"].items(), key=lambda x: x[1])[0] if m["chains"] else "?"
+        top_node = top_chain.split(" -> ")[-1] if " -> " in top_chain else top_chain
+        clients_out.append({
+            "ip": ip,
+            "name": names.get(ip) or "",
+            "primary_chain": top_chain,
+            "primary_node": top_node,
+            "connections": m["count"],
+            "rules_hit": m["rules"],
+            "host_recent": m["host_recent"],
+            "overrides": overrides.get(ip) or {},
+        })
+    clients_out.sort(key=lambda x: -x["connections"])
+
+    return jsonify({"ok": True, "clients": clients_out, "global_rules": global_rules})
+
+
 @app.route("/api/mihomo/groups")
 def mihomo_groups():
     """List selectable proxy groups + nodes."""
