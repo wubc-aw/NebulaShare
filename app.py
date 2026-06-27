@@ -1101,10 +1101,13 @@ def mihomo_set_mode():
 @app.route("/api/mihomo/connections/recent")
 def mihomo_connections_recent():
     limit = request.args.get("limit", 12, type=int)
+    ip_filter = (request.args.get("ip") or "").strip()
     data = mihomo_get("/connections", timeout=3)
     if not isinstance(data, dict) or "_error" in data:
         return jsonify({"ok": False, "error": data.get("_error", "no data")}), 502
     conns = list(data.get("connections") or [])
+    if ip_filter:
+        conns = [c for c in conns if (c.get("metadata") or {}).get("sourceIP") == ip_filter]
     conns.sort(key=lambda c: c.get("start", ""), reverse=True)
     out = []
     for c in conns[:limit]:
