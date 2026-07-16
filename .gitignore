@@ -34,3 +34,10 @@ app.py.bak.*
 
 # Logs
 *.log
+
+# Build outputs
+nebula-share-frontend/dist/
+nebula-share-frontend/.next/
+nebula-share-frontend/out/
+nebula-share-frontend/node_modules/
+static/

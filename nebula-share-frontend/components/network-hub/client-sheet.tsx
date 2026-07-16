@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { X, Plus, Trash2, Save, Activity } from "lucide-react"
+import { X, Plus, Trash2, Save, Activity, Pencil, Check } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface ClientSheetProps {
@@ -15,6 +15,7 @@ interface ClientSheetProps {
   globalRules: any[]
   chainLog: any[]
   onSave: (ip: string, overrides: Record<string, string>) => Promise<void>
+  onSaveName: (ip: string, name: string) => Promise<void>
 }
 
 function getNodeColor(name: string) {
@@ -45,9 +46,13 @@ export function ClientSheet({
   globalRules,
   chainLog,
   onSave,
+  onSaveName,
 }: ClientSheetProps) {
   const [editing, setEditing] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
+  const [editingAlias, setEditingAlias] = useState(false)
+  const [aliasDraft, setAliasDraft] = useState("")
+  const [aliasSaving, setAliasSaving] = useState(false)
 
   // Reset editing state when sheet opens
   useEffect(() => {
@@ -55,8 +60,16 @@ export function ClientSheet({
       setEditing({ ...route.overrides })
     } else if (!isOpen) {
       setEditing({})
+      setEditingAlias(false)
+      setAliasDraft("")
     }
   }, [isOpen, route?.overrides])
+
+  useEffect(() => {
+    if (isOpen && clientName !== undefined) {
+      setAliasDraft(clientName)
+    }
+  }, [isOpen, clientName])
 
   if (!isOpen || !ip || !client) return null
 
@@ -99,6 +112,17 @@ export function ClientSheet({
     }
   }
 
+  const handleAliasSave = async () => {
+    if (!ip) return
+    setAliasSaving(true)
+    try {
+      await onSaveName(ip, aliasDraft.trim())
+      setEditingAlias(false)
+    } finally {
+      setAliasSaving(false)
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end">
       {/* Backdrop */}
@@ -115,8 +139,50 @@ export function ClientSheet({
             <div className="w-10 h-10 rounded-lg bg-secondary/50 flex items-center justify-center shrink-0">
               <span className="text-sm font-mono font-semibold">{ip.split('.').pop()}</span>
             </div>
-            <div>
-              <p className="text-base font-semibold truncate">{clientName || ip}</p>
+            <div className="flex-1 min-w-0">
+              {editingAlias ? (
+                <div className="flex items-center gap-2">
+                  <input
+                    autoFocus
+                    value={aliasDraft}
+                    onChange={(e) => setAliasDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleAliasSave()
+                      if (e.key === "Escape") {
+                        setEditingAlias(false)
+                        setAliasDraft(clientName || "")
+                      }
+                    }}
+                    placeholder="备注名称"
+                    className="flex-1 min-w-0 px-2 py-1 text-sm bg-background rounded border border-border focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                  <button
+                    onClick={handleAliasSave}
+                    disabled={aliasSaving}
+                    className="p-1 rounded-md bg-success/10 text-success hover:bg-success/20 transition-colors disabled:opacity-50"
+                  >
+                    <Check className="w-3.5 h-3.5" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditingAlias(false)
+                      setAliasDraft(clientName || "")
+                    }}
+                    className="p-1 rounded-md bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" strokeWidth={2} />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setEditingAlias(true)}
+                  className="group flex items-center gap-1.5 text-left"
+                  title={clientName ? "点击修改备注" : "点击添加备注"}
+                >
+                  <p className="text-base font-semibold truncate">{clientName || ip}</p>
+                  <Pencil className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" strokeWidth={2} />
+                </button>
+              )}
               {clientName && <p className="text-sm text-muted-foreground font-mono">{ip}</p>}
             </div>
           </div>

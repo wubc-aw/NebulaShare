@@ -79,13 +79,6 @@ interface WanSpeedResult {
   upload: number
 }
 
-interface WanSpeedResult {
-  ok: boolean
-  ping: number
-  download: number
-  upload: number
-}
-
 const SERVICE_NAME_MAP: Record<string, string> = {
   wechat: "微信",
   bilibili: "哔哩哔哩",
@@ -180,9 +173,6 @@ export function NetworkHub() {
   const [clientsLoading, setClientsLoading] = useState(false)
   const [clientRoutes, setClientRoutes] = useState<{ clients: any[]; global_rules: any[] } | null>(null)
   const [clientNames, setClientNames] = useState<Record<string, string>>({})
-  const [editingClientIp, setEditingClientIp] = useState<string | null>(null)
-  const [editName, setEditName] = useState("")
-  const [saveNameError, setSaveNameError] = useState<string | null>(null)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [providerConfigExpanded, setProviderConfigExpanded] = useState(false)
   const [clientSheetOpen, setClientSheetOpen] = useState(false)
@@ -529,20 +519,28 @@ export function NetworkHub() {
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <p className="text-base font-semibold">{effectiveNodeName}</p>
-                {effectiveNodeName !== "服务未运行" && effectiveNodeName !== "直连" && effectiveNodeName !== "未选择" && globalGroup && (
-                  <span className={cn(
-                    "text-xs font-mono bg-secondary/60 px-1.5 py-0.5 rounded",
-                    (() => {
-                      const delay = globalGroup.members.find(m => m.name === globalGroup.now)?.delay
-                      if (!delay || delay <= 0) return "text-muted-foreground"
-                      if (delay < 100) return "text-emerald-400"
-                      if (delay < 200) return "text-amber-400"
-                      return "text-red-400"
-                    })()
-                  )}>
-                    {globalGroup.members.find(m => m.name === globalGroup.now)?.delay || "--"}ms
-                  </span>
+                {nodesLoading && effectiveNodeName === "未选择" ? (
+                  <span className="text-sm text-muted-foreground">加载中...</span>
+                ) : nodesError ? (
+                  <span className="text-sm text-destructive">{nodesError}</span>
+                ) : (
+                  <>
+                    <p className="text-base font-semibold">{effectiveNodeName}</p>
+                    {effectiveNodeName !== "服务未运行" && effectiveNodeName !== "直连" && effectiveNodeName !== "未选择" && globalGroup && (
+                      <span className={cn(
+                        "text-xs font-mono bg-secondary/60 px-1.5 py-0.5 rounded",
+                        (() => {
+                          const delay = globalGroup.members.find(m => m.name === globalGroup.now)?.delay
+                          if (!delay || delay <= 0) return "text-muted-foreground"
+                          if (delay < 100) return "text-emerald-400"
+                          if (delay < 200) return "text-amber-400"
+                          return "text-red-400"
+                        })()
+                      )}>
+                        {globalGroup.members.find(m => m.name === globalGroup.now)?.delay || "--"}ms
+                      </span>
+                    )}
+                  </>
                 )}
               </div>
             </button>
@@ -762,6 +760,12 @@ export function NetworkHub() {
                           <p className="text-sm font-semibold truncate">{displayName || client.ip}</p>
                           {displayName && <p className="text-xs text-muted-foreground font-mono truncate">{client.ip}</p>}
                         </div>
+                        <span className={cn(
+                          "text-xs px-2 py-0.5 rounded-full font-medium shrink-0",
+                          client.chain.includes("DIRECT") ? "bg-success/10 text-success" : "bg-primary/10 text-primary"
+                        )}>
+                          {client.chain.includes("DIRECT") ? "直连" : "代理"}
+                        </span>
                       </div>
                       <div className="flex items-center justify-between">
                         <span className={cn("text-xs font-mono", getNodeColor(route?.primary_node || ""))}>
@@ -787,6 +791,7 @@ export function NetworkHub() {
             globalRules={clientRoutes?.global_rules || []}
             chainLog={clientChainLog}
             onSave={saveClientRoutes}
+            onSaveName={saveClientName}
           />
         </div>
       )}
@@ -990,7 +995,7 @@ function SpeedTest() {
           <div className="flex items-center gap-2">
             <Activity className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
             <span className="text-sm font-medium">互联网测速</span>
-            <span className="text-sm text-muted-foreground/70">via speedtest.net</span>
+            <span className="text-xs text-muted-foreground/70">走当前网关/节点</span>
           </div>
           <button
             onClick={runWanTest}
@@ -1000,11 +1005,14 @@ function SpeedTest() {
             {isRunning && testType === "wan" ? "测试中" : "开始测试"}
           </button>
         </div>
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-3 gap-2 mb-3">
           <Metric label="Ping" value={results.wan.ping || "--"} unit="ms" />
           <Metric label="下载" value={results.wan.download || "--"} unit="Mbps" />
           <Metric label="上传" value={results.wan.upload || "--"} unit="Mbps" />
         </div>
+        <p className="text-xs text-muted-foreground/60 leading-relaxed">
+          该测速跟随当前路由规则，反映经过代理网关后的实际可用带宽；若与 Steam 等直连流量差异较大，说明对应流量未走代理或节点不同。
+        </p>
       </Panel>
     </>
   )

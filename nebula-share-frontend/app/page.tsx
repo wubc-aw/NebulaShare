@@ -17,6 +17,7 @@ import {
   Clock,
   ChevronRight,
   MessageSquare,
+  Globe,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -37,6 +38,7 @@ interface MihomoStatus {
   traffic: { up: number; down: number }
   upload_total: number
   download_total: number
+  effective_node?: string
 }
 
 interface HistoryMeta {
@@ -270,6 +272,13 @@ export default function DashboardPage() {
                     {mihomo.connections} 连接
                   </span>
                 </div>
+                {mihomo.effective_node && (
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary/30">
+                    <Globe className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
+                    <span className="text-xs text-muted-foreground">生效节点</span>
+                    <span className="text-sm font-medium truncate ml-auto">{mihomo.effective_node}</span>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-3">
                   <div className="px-3 py-2 rounded-lg bg-secondary/30">
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-0.5">

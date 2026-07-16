@@ -440,35 +440,127 @@ def lan_speed_upload():
     return jsonify({"ok": True, "bytes_received": total})
 
 
-@app.route("/api/speedtest/wan")
-def wan_speedtest():
-    """Run external speedtest via speedtest-cli, bypassing TUN interface."""
+def _ping_latency(host="1.1.1.1", timeout=5):
+    """Return average RTT in ms, or None on failure."""
     try:
-        lan_ips = get_local_ips()
-        source_ip = lan_ips[0] if lan_ips else None
-        cmd = [SPEEDTEST_CLI, "--simple"]
-        if source_ip and source_ip != "0.0.0.0":
-            cmd.extend(["--source", source_ip])
         result = subprocess.run(
-            cmd,
-            capture_output=True, text=True, timeout=90
+            ["ping", "-c", "3", "-W", str(timeout), host],
+            capture_output=True, text=True, timeout=timeout * 4
         )
         if result.returncode != 0:
-            return jsonify({"error": result.stderr or "speedtest failed"}), 500
+            return None
+        # Parse "rtt min/avg/max/mdev = 1.234/5.678/9.012/1.234 ms"
+        for line in result.stdout.splitlines():
+            if "avg" in line and "=" in line:
+                avg = line.split("=")[1].strip().split("/")[1]
+                return round(float(avg), 1)
+        return None
+    except Exception:
+        return None
 
-        lines = result.stdout.strip().splitlines()
-        data = {}
-        for line in lines:
-            if line.startswith("Ping:"):
-                data["ping"] = float(line.split(":")[1].strip().split()[0])
-            elif line.startswith("Download:"):
-                data["download"] = float(line.split(":")[1].strip().split()[0])
-            elif line.startswith("Upload:"):
-                data["upload"] = float(line.split(":")[1].strip().split()[0])
 
-        return jsonify({"ok": True, **data})
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "speedtest timeout"}), 504
+def _curl_transfer_speed(url, size_mb, timeout=60, upload=False):
+    """Measure transfer speed (Mbps) via curl. Returns (speed_mbps, bytes_transferred)."""
+    import tempfile
+    try:
+        if upload:
+            # Generate random payload in a temp file to avoid memory blow-up.
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(os.urandom(size_mb * 1024 * 1024))
+                tmp_path = tmp.name
+            try:
+                cmd = [
+                    "curl", "-s", "-o", "/dev/null", "-w",
+                    "%{http_code} %{size_upload} %{time_total}",
+                    "--max-time", str(timeout),
+                    "-X", "POST", "--data-binary", f"@{tmp_path}",
+                    url,
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+        else:
+            cmd = [
+                "curl", "-s", "-o", "/dev/null", "-w",
+                "%{http_code} %{size_download} %{time_total}",
+                "--max-time", str(timeout),
+                url,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+
+        if result.returncode != 0:
+            return None, 0
+        parts = result.stdout.strip().split()
+        if len(parts) != 3:
+            return None, 0
+        code, size_bytes, elapsed = parts
+        if not code.startswith("2"):
+            return None, 0
+        size = int(size_bytes)
+        seconds = float(elapsed)
+        if seconds <= 0 or size <= 0:
+            return None, 0
+        # Mbps = bits per second / 1e6
+        return round((size * 8) / (seconds * 1_000_000), 2), size
+    except Exception:
+        return None, 0
+
+
+# HTTP test endpoints that tolerate being routed through a proxy/TUN.
+WAN_DOWNLOAD_ENDPOINTS = [
+    ("http://speedtest.tele2.net/100MB.zip", 100),
+    ("http://speedtest.tele2.net/50MB.zip", 50),
+    ("http://speedtest.tele2.net/10MB.zip", 10),
+    ("http://speedtest.tele2.net/5MB.zip", 5),
+    ("http://speedtest.tele2.net/1MB.zip", 1),
+]
+WAN_UPLOAD_ENDPOINTS = [
+    "https://pie.dev/post",
+    "http://httpbin.org/post",
+]
+
+
+@app.route("/api/speedtest/wan")
+def wan_speedtest():
+    """Run external speedtest via curl to public HTTP endpoints.
+
+    Note: On a system with TUN/auto-route, this traffic follows the active
+    routing rules just like a browser would. It therefore measures the speed
+    achievable through the current gateway/proxy node, not the raw ISP line.
+    """
+    try:
+        ping = _ping_latency("1.1.1.1", timeout=3) or _ping_latency("8.8.8.8", timeout=3) or 0
+
+        # Download: pick the smallest endpoint that yields a stable measurement.
+        download_mbps = 0
+        download_bytes = 0
+        for url, size_mb in WAN_DOWNLOAD_ENDPOINTS:
+            speed, transferred = _curl_transfer_speed(url, size_mb, timeout=45)
+            if speed is not None and speed > 0:
+                download_mbps = speed
+                download_bytes = transferred
+                break
+
+        # Upload: POST a small payload to a public echo endpoint.
+        upload_mbps = 0
+        for url in WAN_UPLOAD_ENDPOINTS:
+            speed, _ = _curl_transfer_speed(url, size_mb=2, timeout=30, upload=True)
+            if speed is not None and speed > 0:
+                upload_mbps = speed
+                break
+
+        if download_mbps <= 0 and upload_mbps <= 0 and ping <= 0:
+            return jsonify({"error": "无法连接到测速服务器，请检查网络或代理设置"}), 502
+
+        return jsonify({
+            "ok": True,
+            "ping": ping,
+            "download": download_mbps,
+            "upload": upload_mbps,
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -709,6 +801,7 @@ def mihomo_status():
     cfg = mihomo_get("/configs", timeout=2)
     ver = mihomo_get("/version", timeout=2)
     conns = mihomo_get("/connections", timeout=3)
+    proxies = mihomo_get("/proxies", timeout=3)
 
     for w in workers: w.join(timeout=4)
 
@@ -722,6 +815,13 @@ def mihomo_status():
     state = load_mihomo_state()
     sub_url = state.get("subscription_url", "")
     last_update = state.get("last_update", 0)
+
+    # Determine effective node from GLOBAL selector
+    effective_node = None
+    if isinstance(proxies, dict) and "_error" not in proxies:
+        global_proxy = proxies.get("proxies", {}).get("GLOBAL") or {}
+        if global_proxy.get("type") in ("Selector", "URLTest", "Fallback", "LoadBalance"):
+            effective_node = global_proxy.get("now")
 
     return jsonify({
         "ok": True,
@@ -738,6 +838,7 @@ def mihomo_status():
         "connections": n_conn,
         "upload_total": up_total,
         "download_total": dn_total,
+        "effective_node": effective_node,
         "subscription": {
             "url_full": sub_url,
             "url": mask_url(sub_url),
