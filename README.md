@@ -21,7 +21,7 @@
 | 后端 | Python 3 + Flask | 轻量、树莓派原生支持、单文件即可跑 |
 | 前端 | 纯 HTML/CSS/JS（全部内联） | 零外部 CDN、无网络也能打开 |
 | 测速 | speedtest-cli + 自制 HTTP 流式测速 | 外网用官方 CLI，内网用前后端配合 |
-| 部署 | systemd user service | 无需 root，开机自动登录后自启 |
+| 部署 | systemd system service | 开机自启，崩溃自动重启 |
 | 环境 | Python venv | 隔离依赖，不污染系统 Python |
 
 ## 目录结构
@@ -63,12 +63,12 @@ NebulaShare/
 
 ### 运维
 - 启动自检：目录可写性、磁盘空间、端口占用
-- systemd user service：开机自启、崩溃自动重启、24h 持续运行
+- systemd system service：开机自启、崩溃自动重启、24h 持续运行
 - 服务管理命令：
   ```bash
-  systemctl --user status nebulashare
-  systemctl --user restart nebulashare
-  systemctl --user stop nebulashare
+  sudo systemctl status nebulashare
+  sudo systemctl restart nebulashare
+  sudo systemctl stop nebulashare
   ```
 
 ## 过程记录
@@ -80,7 +80,7 @@ NebulaShare/
    - 内网：流式随机数据测速，数据不落盘
    - 外网：集成 speedtest-cli，解决 mihomo TUN 接口干扰问题
 5. **IP 过滤**：排除 TUN/虚拟网卡，页面只显示真实局域网 IP
-6. **部署固化**：systemd user service，无需 sudo，开机自启
+6. **部署固化**：systemd system service，开机自启
 
 ## 运行结果
 
@@ -99,7 +99,7 @@ NebulaShare/
 cd /home/aw/NebulaShare && ./start.sh
 
 # 或 systemd（推荐）
-systemctl --user restart nebulashare
+sudo systemctl restart nebulashare
 ```
 
 ## 环境变量
