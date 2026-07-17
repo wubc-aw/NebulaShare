@@ -113,7 +113,7 @@ export function ArticleListItem({ article, selected, onClick, onToggleStar }: Ar
           <button
             onClick={onToggleStar}
             className={cn(
-              "p-1.5 rounded-lg transition-all duration-200 opacity-0 group-hover:opacity-100",
+              "p-1.5 rounded-lg transition-all duration-200 sm:opacity-0 sm:group-hover:opacity-100",
               article.is_starred
                 ? "opacity-100 text-chart-4 hover:text-chart-4/80"
                 : "text-muted-foreground hover:text-chart-4 hover:bg-chart-4/10"

@@ -92,11 +92,11 @@ export default function SourcesPage() {
   return (
     <div className="p-6 sm:p-8 max-w-4xl mx-auto h-full flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6 shrink-0">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/intel"
-            className="p-2 rounded-xl hover:bg-secondary transition-colors"
+            className="p-2 rounded-xl hover:bg-secondary transition-colors shrink-0"
             title="返回情报站"
           >
             <ArrowLeft className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
@@ -111,7 +111,7 @@ export default function SourcesPage() {
         <button
           onClick={handleAdd}
           className={cn(
-            "flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium",
+            "flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium shrink-0",
             "bg-chart-4/10 text-chart-4 hover:bg-chart-4/15 transition-colors"
           )}
         >

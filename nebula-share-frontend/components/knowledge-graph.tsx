@@ -489,7 +489,7 @@ export function KnowledgeGraph({ data, nodeColors, nodeIcons, title, highlightNo
             placeholder="搜索节点..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            className="pl-8 pr-7 py-1.5 rounded-lg bg-card/90 backdrop-blur text-sm placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-primary/30 border border-border/40 w-48"
+            className="pl-8 pr-7 py-1.5 rounded-lg bg-card/90 backdrop-blur text-sm placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-primary/30 border border-border/40 w-40 sm:w-48"
           />
           {searchQuery && (
             <button
@@ -553,7 +553,7 @@ export function KnowledgeGraph({ data, nodeColors, nodeIcons, title, highlightNo
       {/* Detail Panel (slide from right) */}
       <div
         className={cn(
-          "absolute top-0 right-0 h-full w-72 bg-card/95 backdrop-blur border-l border-border/40 transform transition-transform duration-300 ease-out z-10",
+          "absolute top-0 right-0 h-full w-full sm:w-72 bg-card/95 backdrop-blur border-l border-border/40 transform transition-transform duration-300 ease-out z-10",
           selectedNode ? "translate-x-0" : "translate-x-full"
         )}
       >

@@ -1,4 +1,4 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import { ThemeProvider } from '@/components/theme-provider'
 import { AppShell } from '@/components/app-shell'
 import './globals.css'
@@ -25,6 +25,14 @@ export const metadata: Metadata = {
   },
 }
 
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  themeColor: '#0a0a0f',
+}
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -33,7 +41,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" suppressHydrationWarning className="bg-background">
       <body className="font-sans antialiased min-h-screen">
-        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false} disableTransitionOnChange>
+        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false} disableTransitionOnChange themes={["dark", "light", "vivid", "tron"]}>
           <AppShell>{children}</AppShell>
         </ThemeProvider>
       </body>

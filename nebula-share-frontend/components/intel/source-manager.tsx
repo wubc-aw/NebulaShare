@@ -141,69 +141,71 @@ export function SourceManager({
           <div
             key={source.id}
             className={cn(
-              "group relative flex items-center gap-4 px-4 py-3.5 rounded-xl",
+              "group relative flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4 px-4 py-3.5 rounded-xl",
               "border border-border/40 transition-all duration-200",
               isInactive
                 ? "bg-secondary/30 opacity-70"
                 : "bg-card hover:bg-secondary/20 hover:shadow-[var(--shadow-card)]"
             )}
           >
-            {/* Active status indicator */}
-            <div className="shrink-0">
-              {isInactive ? (
-                <XCircle
-                  className={cn(
-                    "w-4 h-4",
-                    isAutoPaused ? "text-destructive" : "text-muted-foreground/50"
-                  )}
-                  strokeWidth={1.5}
-                />
-              ) : (
-                <CheckCircle2 className="w-4 h-4 text-emerald-500" strokeWidth={1.5} />
-              )}
-            </div>
-
-            {/* Source info */}
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-sm font-medium truncate">{source.name}</span>
-                <span
-                  className={cn(
-                    "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium border",
-                    typeCfg.color
-                  )}
-                >
-                  {typeCfg.icon}
-                  {typeCfg.label}
-                </span>
-                {isAutoPaused && (
-                  <span
-                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-destructive/10 text-destructive border border-destructive/20"
-                    title="连续失败多次，已自动暂停"
-                  >
-                    <AlertTriangle className="w-3 h-3" strokeWidth={1.5} />
-                    自动暂停
-                  </span>
+            <div className="flex items-center gap-3 sm:gap-4">
+              {/* Active status indicator */}
+              <div className="shrink-0">
+                {isInactive ? (
+                  <XCircle
+                    className={cn(
+                      "w-4 h-4",
+                      isAutoPaused ? "text-destructive" : "text-muted-foreground/50"
+                    )}
+                    strokeWidth={1.5}
+                  />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-500" strokeWidth={1.5} />
                 )}
               </div>
 
-              <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                <span>{source.article_count} 篇文章</span>
-                <span className="text-border">·</span>
-                <span>上次同步: {formatLastSync(source.last_fetch_at)}</span>
-                {hasError && (
-                  <>
-                    <span className="text-border">·</span>
-                    <span className="text-destructive/80 truncate max-w-[200px]" title={source.last_error}>
-                      {source.last_error}
+              {/* Source info */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <span className="text-sm font-medium truncate">{source.name}</span>
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium border",
+                      typeCfg.color
+                    )}
+                  >
+                    {typeCfg.icon}
+                    {typeCfg.label}
+                  </span>
+                  {isAutoPaused && (
+                    <span
+                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-destructive/10 text-destructive border border-destructive/20"
+                      title="连续失败多次，已自动暂停"
+                    >
+                      <AlertTriangle className="w-3 h-3" strokeWidth={1.5} />
+                      自动暂停
                     </span>
-                  </>
-                )}
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                  <span>{source.article_count} 篇文章</span>
+                  <span className="text-border">·</span>
+                  <span>上次同步: {formatLastSync(source.last_fetch_at)}</span>
+                  {hasError && (
+                    <>
+                      <span className="text-border">·</span>
+                      <span className="text-destructive/80 truncate max-w-[200px]" title={source.last_error}>
+                        {source.last_error}
+                      </span>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
 
             {/* Actions */}
-            <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+            <div className="flex items-center gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200 pl-7 sm:pl-0 shrink-0">
               {/* Pause/Resume — RSS only */}
               {isRss && (
                 <button

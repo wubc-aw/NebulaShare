@@ -102,13 +102,13 @@ function Tabs({
   onChange: (id: string) => void
 }) {
   return (
-    <div className="inline-flex items-center gap-0.5 rounded-xl bg-secondary/60 p-1">
+    <div className="inline-flex items-center gap-0.5 rounded-xl bg-secondary/60 p-1 overflow-x-auto max-w-full scrollbar-hide">
       {tabs.map((tab) => (
         <button
           key={tab.id}
           onClick={() => onChange(tab.id)}
           className={cn(
-            "px-3.5 py-1.5 text-sm rounded-lg transition-colors",
+            "px-3.5 py-1.5 text-sm rounded-lg transition-colors whitespace-nowrap shrink-0",
             active === tab.id
               ? "bg-card text-foreground shadow-card"
               : "text-muted-foreground hover:text-foreground",
@@ -178,6 +178,7 @@ export function NetworkHub() {
   const [clientSheetOpen, setClientSheetOpen] = useState(false)
   const [selectedClientIp, setSelectedClientIp] = useState<string | null>(null)
   const [clientChainLog, setClientChainLog] = useState<any[]>([])
+  const [testingNodes, setTestingNodes] = useState<Set<string>>(new Set())
 
   const fetchStatus = useCallback(async () => {
     setStatusLoading(true)
@@ -382,6 +383,36 @@ export function NetworkHub() {
     }
   }
 
+  const handleTestNode = async (groupName: string, nodeName: string) => {
+    const key = `${groupName}::${nodeName}`
+    setTestingNodes((prev) => new Set(prev).add(key))
+    try {
+      const res = await fetch(`/api/mihomo/test/proxy/${encodeURIComponent(nodeName)}?timeout=5000`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (!data.ok) throw new Error(data.error || "Test failed")
+      const newDelay = data.delay || 0
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.name === groupName
+            ? {
+                ...g,
+                members: g.members.map((m) => (m.name === nodeName ? { ...m, delay: newDelay } : m)),
+              }
+            : g
+        )
+      )
+    } catch (err) {
+      console.error("Node latency test failed:", err)
+    } finally {
+      setTestingNodes((prev) => {
+        const next = new Set(prev)
+        next.delete(key)
+        return next
+      })
+    }
+  }
+
   const handleModeSwitch = async (mode: "rule" | "global" | "direct") => {
     setRoutingMode(mode)
     try {
@@ -424,11 +455,20 @@ export function NetworkHub() {
 
   const totalNodes = groups.reduce((sum, g) => sum + g.members.length, 0)
   const globalGroup = groups.find((g) => g.name === "GLOBAL")
+  const finalGroup = groups.find((g) => /Final/i.test(g.name))
+  const effectiveGroup = routingMode === "global" ? globalGroup : routingMode === "rule" ? (finalGroup || globalGroup) : undefined
   const effectiveNodeName = !gatewayEnabled
     ? "服务未运行"
     : routingMode === "direct"
     ? "直连"
-    : globalGroup?.now || "未选择"
+    : effectiveGroup?.now || "未选择"
+  const effectiveGroupLabel = routingMode === "direct"
+    ? "直连模式"
+    : routingMode === "global"
+    ? "全局代理"
+    : finalGroup
+    ? "规则分流 · Final"
+    : "规则分流"
 
   const selectedClient = selectedClientIp
     ? clients.find((c) => c.ip === selectedClientIp) || null
@@ -440,7 +480,7 @@ export function NetworkHub() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">网络枢纽</h2>
           <p className="text-sm text-muted-foreground mt-1">网关、连通性与测速</p>
@@ -485,12 +525,12 @@ export function NetworkHub() {
                 <span className="text-sm font-semibold">实时流量</span>
               </div>
               {status ? (
-                <div className="flex items-center gap-4">
+                <div className="flex flex-wrap items-center gap-4">
                   <div>
                     <p className="text-xs text-muted-foreground mb-0.5">上传</p>
                     <p className="text-base font-mono font-semibold">{formatBytes(status.traffic.up)}<span className="text-xs text-muted-foreground ml-1">/s</span></p>
                   </div>
-                  <div className="w-px h-8 bg-border" />
+                  <div className="w-px h-8 bg-border hidden sm:block" />
                   <div>
                     <p className="text-xs text-muted-foreground mb-0.5">下载</p>
                     <p className="text-base font-mono font-semibold">{formatBytes(status.traffic.down)}<span className="text-xs text-muted-foreground ml-1">/s</span></p>
@@ -502,48 +542,67 @@ export function NetworkHub() {
             </div>
 
             {/* Effective Node */}
-            <button
-              onClick={() => {
-                const el = document.getElementById("node-selector")
-                el?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }}
-              className="card-premium p-4 text-left w-full hover:shadow-md transition-shadow"
-            >
+            <div className="card-premium p-4 w-full">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <Globe className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
                   <span className="text-sm font-semibold">生效节点</span>
                 </div>
-                <span className="text-xs text-muted-foreground font-mono bg-secondary/60 px-2 py-0.5 rounded">
-                  {routingMode === "direct" ? "直连模式" : routingMode === "global" ? "全局代理" : "规则分流"}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground font-mono bg-secondary/60 px-2 py-0.5 rounded">
+                    {effectiveGroupLabel}
+                  </span>
+                  {effectiveGroup && effectiveNodeName !== "服务未运行" && effectiveNodeName !== "直连" && effectiveNodeName !== "未选择" && (
+                    <button
+                      type="button"
+                      onClick={() => effectiveGroup && handleTestNode(effectiveGroup.name, effectiveNodeName)}
+                      disabled={effectiveGroup ? testingNodes.has(`${effectiveGroup.name}::${effectiveNodeName}`) : true}
+                      className={cn(
+                        "flex items-center justify-center w-6 h-6 rounded-md transition-all opacity-70 hover:opacity-100 hover:bg-secondary/60 focus:outline-none focus:ring-2 focus:ring-primary/30",
+                        effectiveGroup && testingNodes.has(`${effectiveGroup.name}::${effectiveNodeName}`) && "opacity-40 cursor-not-allowed"
+                      )}
+                      title="测试当前生效节点延迟"
+                      aria-label={`测试 ${effectiveNodeName} 延迟`}
+                    >
+                      <Zap className={cn("w-3.5 h-3.5", effectiveGroup && testingNodes.has(`${effectiveGroup.name}::${effectiveNodeName}`) && "animate-pulse")} strokeWidth={1.5} />
+                    </button>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                {nodesLoading && effectiveNodeName === "未选择" ? (
-                  <span className="text-sm text-muted-foreground">加载中...</span>
-                ) : nodesError ? (
-                  <span className="text-sm text-destructive">{nodesError}</span>
-                ) : (
-                  <>
-                    <p className="text-base font-semibold">{effectiveNodeName}</p>
-                    {effectiveNodeName !== "服务未运行" && effectiveNodeName !== "直连" && effectiveNodeName !== "未选择" && globalGroup && (
-                      <span className={cn(
-                        "text-xs font-mono bg-secondary/60 px-1.5 py-0.5 rounded",
-                        (() => {
-                          const delay = globalGroup.members.find(m => m.name === globalGroup.now)?.delay
-                          if (!delay || delay <= 0) return "text-muted-foreground"
-                          if (delay < 100) return "text-emerald-400"
-                          if (delay < 200) return "text-amber-400"
-                          return "text-red-400"
-                        })()
-                      )}>
-                        {globalGroup.members.find(m => m.name === globalGroup.now)?.delay || "--"}ms
-                      </span>
-                    )}
-                  </>
-                )}
-              </div>
-            </button>
+              <button
+                onClick={() => {
+                  const el = document.getElementById("node-selector")
+                  el?.scrollIntoView({ behavior: "smooth", block: "start" })
+                }}
+                className="w-full text-left hover:opacity-80 transition-opacity"
+              >
+                <div className="flex items-center gap-2">
+                  {nodesLoading && effectiveNodeName === "未选择" ? (
+                    <span className="text-sm text-muted-foreground">加载中...</span>
+                  ) : nodesError ? (
+                    <span className="text-sm text-destructive">{nodesError}</span>
+                  ) : (
+                    <>
+                      <p className="text-base font-semibold">{effectiveNodeName}</p>
+                      {effectiveNodeName !== "服务未运行" && effectiveNodeName !== "直连" && effectiveNodeName !== "未选择" && effectiveGroup && (
+                        <span className={cn(
+                          "text-xs font-mono bg-secondary/60 px-1.5 py-0.5 rounded",
+                          (() => {
+                            const delay = effectiveGroup.members.find(m => m.name === effectiveGroup.now)?.delay
+                            if (!delay || delay <= 0) return "text-muted-foreground"
+                            if (delay < 100) return "text-emerald-400"
+                            if (delay < 200) return "text-amber-400"
+                            return "text-red-400"
+                          })()
+                        )}>
+                          {effectiveGroup.members.find(m => m.name === effectiveGroup.now)?.delay || "--"}ms
+                        </span>
+                      )}
+                    </>
+                  )}
+                </div>
+              </button>
+            </div>
           </div>
 
           {/* ── 2. Provider Configuration ── */}
@@ -631,25 +690,53 @@ export function NetworkHub() {
                             <div className="flex flex-wrap gap-2">
                               {group.members.map((node) => {
                                 const isActive = group.now === node.name
+                                const testKey = `${group.name}::${node.name}`
+                                const isTesting = testingNodes.has(testKey)
                                 return (
-                                  <button
-                                    key={`${group.name}::${node.name}`}
-                                    onClick={() => handleProviderNodeSwitch(group.name, node.name)}
-                                    className={cn("node-chip", isActive && "active")}
+                                  <div
+                                    key={testKey}
+                                    className={cn(
+                                      "node-chip",
+                                      isActive && "active"
+                                    )}
                                     title={node.name}
                                   >
-                                    <span className="truncate max-w-[120px]">{node.name}</span>
-                                    {node.delay !== null && node.delay > 0 ? (
-                                      <span className={cn(
-                                        "text-xs font-mono tabular-nums opacity-80",
-                                        node.delay < 100 ? "text-emerald-400" : node.delay < 200 ? "text-amber-400" : "text-red-400"
-                                      )}>
-                                        {node.delay}ms
-                                      </span>
-                                    ) : (
-                                      <span className="text-xs font-mono opacity-50">--</span>
-                                    )}
-                                  </button>
+                                    <div
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={() => handleProviderNodeSwitch(group.name, node.name)}
+                                      className="flex items-center gap-2 min-w-0 cursor-pointer"
+                                    >
+                                      <span className="truncate max-w-[120px]">{node.name}</span>
+                                      {node.delay !== null && node.delay > 0 ? (
+                                        <span className={cn(
+                                          "text-xs font-mono tabular-nums opacity-80",
+                                          node.delay < 100 ? "text-emerald-400" : node.delay < 200 ? "text-amber-400" : "text-red-400"
+                                        )}>
+                                          {node.delay}ms
+                                        </span>
+                                      ) : (
+                                        <span className="text-xs font-mono opacity-50">--</span>
+                                      )}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.preventDefault()
+                                        e.stopPropagation()
+                                        handleTestNode(group.name, node.name)
+                                      }}
+                                      disabled={isTesting}
+                                      className={cn(
+                                        "shrink-0 flex items-center justify-center w-6 h-6 rounded-md transition-all opacity-70 hover:opacity-100 hover:bg-secondary/60 focus:outline-none focus:ring-2 focus:ring-primary/30",
+                                        isTesting && "opacity-40 cursor-not-allowed"
+                                      )}
+                                      title="测试节点延迟"
+                                      aria-label={`测试 ${node.name} 延迟`}
+                                    >
+                                      <Zap className={cn("w-3.5 h-3.5", isTesting && "animate-pulse")} strokeWidth={1.5} />
+                                    </button>
+                                  </div>
                                 )
                               })}
                             </div>
@@ -672,7 +759,7 @@ export function NetworkHub() {
                     key={mode}
                     onClick={() => handleModeSwitch(mode)}
                     className={cn(
-                      "flex-1 py-2.5 rounded-lg text-sm font-medium transition-all duration-200",
+                      "flex-1 min-w-0 py-2.5 px-1 rounded-lg text-sm font-medium transition-all duration-200",
                       routingMode === mode
                         ? "bg-card text-foreground shadow-sm"
                         : "text-muted-foreground hover:text-foreground"
@@ -1005,7 +1092,7 @@ function SpeedTest() {
             {isRunning && testType === "wan" ? "测试中" : "开始测试"}
           </button>
         </div>
-        <div className="grid grid-cols-3 gap-2 mb-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
           <Metric label="Ping" value={results.wan.ping || "--"} unit="ms" />
           <Metric label="下载" value={results.wan.download || "--"} unit="Mbps" />
           <Metric label="上传" value={results.wan.upload || "--"} unit="Mbps" />

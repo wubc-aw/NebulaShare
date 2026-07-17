@@ -1,10 +1,11 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
-import { MessageSquare, Clock, Folder, Hash, ChevronRight, Search, Calendar, Bot, User, BrainCircuit, Wrench, Monitor, HardDrive, BarChart3, Tag, Lightbulb, AlertCircle, Code2, GitBranch, Upload, XCircle, CheckCircle2, ScanLine, Play, Loader2, FileText, Layers, Network } from "lucide-react"
+import { useState, useEffect, useRef, useMemo } from "react"
+import { MessageSquare, Clock, Folder, Hash, ChevronRight, Search, Calendar, Bot, User, BrainCircuit, Wrench, Monitor, HardDrive, BarChart3, Tag, Lightbulb, AlertCircle, Code2, GitBranch, Upload, XCircle, CheckCircle2, ScanLine, Play, Loader2, FileText, Layers, Network, Image as ImageIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 
-interface HistoryMessage { role: "user" | "assistant"; text: string; timestamp: string; hostname?: string }
+interface HistoryMessage { role: "user" | "assistant"; text: string; timestamp: string; hostname?: string; turnId?: string }
+interface HistoryMedia { type: "image"; url: string; filename: string; turnId?: string }
 interface DeviceInfo { hostname: string; machineId: string; localIp: string; platform: string; lastSync: string; sessions: number; messages: number }
 interface UsageInfo { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCost: number; toolCalls: number }
 interface BehaviorInfo { dominantStyle: string; avgQuestionLength: number; followUpRatio: number; codeRatio: number; questionCount: number; responseCount: number }
@@ -12,11 +13,11 @@ interface KeyContentInfo { decisions: string[]; codeReferences: string[]; fileRe
 interface HistorySession {
   sessionId: string; title: string; project: string; messageCount: number;
   startTime: string; endTime: string; messages: HistoryMessage[];
-  hasFullDialog: boolean; categories?: string[]; behavior?: BehaviorInfo;
-  usage?: UsageInfo; keyContent?: KeyContentInfo; deviceName?: string; deviceId?: string;
+  hasFullDialog: boolean; source?: "claude" | "codex"; categories?: string[]; behavior?: BehaviorInfo;
+  usage?: UsageInfo; keyContent?: KeyContentInfo; deviceName?: string; deviceId?: string; media?: HistoryMedia[];
 }
 interface HistoryData {
-  meta: { generatedAt: string; totalSessions: number; totalMessages: number; projects: Record<string, number>; devices: Record<string, DeviceInfo>; deviceCount: number; categoryDistribution?: Record<string, number>; styleDistribution?: Record<string, number>; totalTokens?: { input: number; output: number; total: number; estimatedCostUSD: number } }
+  meta: { generatedAt: string; totalSessions: number; totalMessages: number; projects: Record<string, number>; devices: Record<string, DeviceInfo>; deviceCount: number; categoryDistribution?: Record<string, number>; styleDistribution?: Record<string, number>; totalTokens?: { input: number; output: number; total: number; estimatedCostUSD: number }; sources?: Record<string, number> }
   sessions: HistorySession[]
 }
 
@@ -60,14 +61,16 @@ function MsgContent({ text }: { text: string }) {
   )
 }
 
-export function ClaudeHistory() {
+export function HistorySessions() {
   const [data, setData] = useState<HistoryData | null>(null)
   const [loading, setLoading] = useState(true)
   const [sel, setSel] = useState<HistorySession | null>(null)
   const [q, setQ] = useState("")
   const [pf, setPf] = useState("all")
   const [df, setDf] = useState("all")
+  const [sf, setSf] = useState("all")
   const [showDev, setShowDev] = useState(false)
+  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({})
   const [showAnalysis, setShowAnalysis] = useState(false)
   const [uploadStatus, setUploadStatus] = useState<{ status: "idle" | "uploading" | "done" | "error"; message?: string }>({ status: "idle" })
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -106,6 +109,25 @@ export function ClaudeHistory() {
 
   useEffect(() => { fetch("/api/claude-history").then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false)) }, [])
   useEffect(() => { if (sel && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight }, [sel])
+
+  const tree = useMemo(() => {
+    if (!data) return {}
+    const t: Record<string, Record<string, Record<string, HistorySession[]>>> = {}
+    for (const s of data.sessions) {
+      const did = s.deviceId || "unknown"
+      const src = s.source || "claude"
+      const proj = s.project || "未知项目"
+      t[did] ||= {}
+      t[did][src] ||= {}
+      t[did][src][proj] ||= []
+      t[did][src][proj].push(s)
+    }
+    return t
+  }, [data])
+
+  const toggleNode = (key: string) => {
+    setExpandedNodes(prev => ({ ...prev, [key]: !prev[key] }))
+  }
 
   const doScan = async () => {
     setScanLoading(true)
@@ -166,33 +188,38 @@ export function ClaudeHistory() {
   const cats = data.meta.categoryDistribution || {}
   const styles = data.meta.styleDistribution || {}
   const toks = data.meta.totalTokens
+  const sourceStats = data.meta.sources || {}
 
   const filtered = data.sessions.filter(s => {
     const mp = pf === "all" || s.project === pf
     const md = df === "all" || s.deviceId === df
+    const ms = sf === "all" || s.source === sf
     const mq = !q || s.title.toLowerCase().includes(q.toLowerCase()) || s.messages.some(m => m.text.toLowerCase().includes(q.toLowerCase()))
-    return mp && md && mq
+    return mp && md && ms && mq
   })
 
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h2 className="text-lg font-semibold tracking-tight">Claude 历史</h2>
-          <p className="text-sm text-muted-foreground mt-0.5">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold tracking-tight">历史会话</h2>
+          <p className="text-sm text-muted-foreground mt-0.5 truncate">
             {data.meta.totalSessions} 会话 · {data.meta.totalMessages} 消息 · {data.meta.deviceCount} 设备
+            {Object.entries(sourceStats).map(([src, cnt]) => (
+              <span key={src} className={cn("ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium", src === "codex" ? "bg-chart-3/15 text-chart-3" : "bg-chart-1/15 text-chart-1")}>{src === "codex" ? "Codex" : "Claude"} {cnt}</span>
+            ))}
             {toks && <span className="ml-2">· {fmtNum(toks.total)} tokens · ${toks.estimatedCostUSD}</span>}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setShowScanPanel(!showScanPanel)} className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors", showScanPanel ? "bg-primary/10 text-primary" : "bg-secondary/60 text-muted-foreground hover:text-foreground")}>
+        <div className="flex items-center gap-2 shrink-0 overflow-x-auto scrollbar-hide pb-1 sm:pb-0">
+          <button onClick={() => setShowScanPanel(!showScanPanel)} className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0", showScanPanel ? "bg-primary/10 text-primary" : "bg-secondary/60 text-muted-foreground hover:text-foreground")}>
             <ScanLine className="w-3.5 h-3.5 inline mr-1" strokeWidth={1.5} />扫描
           </button>
-          <button onClick={() => setShowAnalysis(!showAnalysis)} className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors", showAnalysis ? "bg-primary/10 text-primary" : "bg-secondary/60 text-muted-foreground hover:text-foreground")}>
+          <button onClick={() => setShowAnalysis(!showAnalysis)} className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0", showAnalysis ? "bg-primary/10 text-primary" : "bg-secondary/60 text-muted-foreground hover:text-foreground")}>
             <BarChart3 className="w-3.5 h-3.5 inline mr-1" strokeWidth={1.5} />分析
           </button>
-          <button onClick={() => setShowDev(!showDev)} className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors", showDev ? "bg-primary/10 text-primary" : "bg-secondary/60 text-muted-foreground hover:text-foreground")}>
+          <button onClick={() => setShowDev(!showDev)} className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0", showDev ? "bg-primary/10 text-primary" : "bg-secondary/60 text-muted-foreground hover:text-foreground")}>
             <Monitor className="w-3.5 h-3.5 inline mr-1" strokeWidth={1.5} />{data.meta.deviceCount} 设备
           </button>
         </div>
@@ -201,12 +228,12 @@ export function ClaudeHistory() {
       {/* Scan & Process Panel */}
       {showScanPanel && (
         <div className="mb-4 p-4 rounded-xl bg-secondary/30 border border-border/40">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
             <h3 className="text-sm font-semibold flex items-center gap-1.5">
               <HardDrive className="w-4 h-4 text-primary" strokeWidth={1.5} />
-              服务器本地 Claude 历史
+              服务器本地 Claude 历史数据
             </h3>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={doScan}
                 disabled={scanLoading}
@@ -269,9 +296,6 @@ export function ClaudeHistory() {
                     <span className={cn("flex items-center gap-1 text-[11px]", scanResult.hasExtracted ? "text-chart-1" : "text-muted-foreground/50")}>
                       <FileText className="w-3 h-3" /> 已提取
                     </span>
-                    <span className={cn("flex items-center gap-1 text-[11px]", scanResult.hasGraph ? "text-chart-1" : "text-muted-foreground/50")}>
-                      <Network className="w-3 h-3" /> 已建图
-                    </span>
                     <span className={cn("flex items-center gap-1 text-[11px]", scanResult.hasAnalysis ? "text-chart-1" : "text-muted-foreground/50")}>
                       <BarChart3 className="w-3 h-3" /> 已分析
                     </span>
@@ -305,7 +329,7 @@ export function ClaudeHistory() {
                           step.status === "skipped" && "text-muted-foreground"
                         )}>
                           {step.name === "extract" && "提取"}
-                          {step.name === "graph" && "建图"}
+                          {step.name === "merge" && "合并"}
                           {step.name === "analyze" && "分析"}
                           {step.name === "fetch" && "请求"}
                         </span>
@@ -317,7 +341,6 @@ export function ClaudeHistory() {
                   {processResult.finalState && (
                     <div className="mt-2 pt-2 border-t border-border/30 flex items-center gap-3 text-[11px]">
                       <span>最终: {processResult.finalState.totalSessions} 会话 · {processResult.finalState.totalMessages} 消息</span>
-                      {processResult.finalState.hasGraph && <span className="text-chart-1">✓ 图谱</span>}
                       {processResult.finalState.hasAnalysis && <span className="text-chart-1">✓ 分析</span>}
                     </div>
                   )}
@@ -402,26 +425,85 @@ export function ClaudeHistory() {
             <span className="text-[10px] text-muted-foreground ml-auto">支持 .zip / .json / .jsonl</span>
           </div>
 
-          {/* Device List */}
-          {devices.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {devices.map(dev => (
-                <div key={dev.machineId} onClick={() => setDf(df === dev.machineId ? "all" : dev.machineId)} className={cn("flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors", df === dev.machineId ? "bg-primary/5 border-primary/30" : "bg-card/50 border-border/40 hover:bg-card")}>
-                  <div className="w-8 h-8 rounded-lg bg-chart-1/10 flex items-center justify-center shrink-0"><Monitor className="w-4 h-4 text-chart-1" strokeWidth={1.5} /></div>
-                  <div className="flex-1 min-w-0"><p className="text-sm font-medium truncate">{dev.hostname}</p><p className="text-[11px] text-muted-foreground">{dev.localIp} · {dev.sessions} 会话</p></div>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary text-muted-foreground">{dev.platform}</span>
+          {/* Device / Source / Project Tree */}
+          <div className="space-y-2">
+            {Object.entries(tree).map(([deviceId, sources]) => {
+              const dev = devices.find(d => d.machineId === deviceId)
+              const devLabel = dev?.hostname || deviceId
+              const devKey = `dev:${deviceId}`
+              const devExpanded = expandedNodes[devKey] ?? true
+              const devSessions = Object.values(sources).flatMap(p => Object.values(p).flat()).length
+              return (
+                <div key={deviceId} className="rounded-lg border border-border/40 bg-card/50 overflow-hidden">
+                  <button
+                    onClick={() => toggleNode(devKey)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm font-medium"
+                  >
+                    {devExpanded ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />}
+                    <Monitor className="w-4 h-4 text-chart-1" strokeWidth={1.5} />
+                    <span>{devLabel}</span>
+                    <span className="ml-auto text-[10px] text-muted-foreground">{devSessions} 会话</span>
+                  </button>
+                  {devExpanded && (
+                    <div className="px-3 pb-2 space-y-1">
+                      {Object.entries(sources).map(([source, projects]) => {
+                        const srcKey = `src:${deviceId}:${source}`
+                        const srcExpanded = expandedNodes[srcKey] ?? true
+                        const srcIcon = source === "codex"
+                          ? <Code2 className="w-3.5 h-3.5 text-chart-3" strokeWidth={1.5} />
+                          : <Bot className="w-3.5 h-3.5 text-chart-1" strokeWidth={1.5} />
+                        const srcCount = Object.values(projects).flat().length
+                        return (
+                          <div key={source} className="ml-4">
+                            <button
+                              onClick={() => toggleNode(srcKey)}
+                              className="w-full flex items-center gap-2 py-1 text-xs font-medium"
+                            >
+                              {srcExpanded ? <ChevronDown className="w-3 h-3 text-muted-foreground" strokeWidth={1.5} /> : <ChevronRight className="w-3 h-3 text-muted-foreground" strokeWidth={1.5} />}
+                              {srcIcon}
+                              <span className="capitalize">{source}</span>
+                              <span className="ml-auto text-[10px] text-muted-foreground">{srcCount} 会话</span>
+                            </button>
+                            {srcExpanded && (
+                              <div className="ml-5 space-y-0.5">
+                                {Object.entries(projects).sort((a, b) => a[0].localeCompare(b[0])).map(([project, sessions]) => (
+                                  <button
+                                    key={project}
+                                    onClick={() => { setDf(deviceId); setSf(source); setPf(project); }}
+                                    className={cn(
+                                      "w-full flex items-center gap-2 px-2 py-1 rounded text-xs text-left hover:bg-secondary/60",
+                                      pf === project && df === deviceId && sf === source ? "bg-primary/10 text-primary" : "text-muted-foreground"
+                                    )}
+                                  >
+                                    <Folder className="w-3 h-3 shrink-0" strokeWidth={1.5} />
+                                    <span className="flex-1 truncate">{project.replace("/home/aw/", "~/")}</span>
+                                    <span className="text-[10px] shrink-0">{sessions.length}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
+              )
+            })}
+          </div>
         </div>
       )}
 
       {/* Filters */}
-      <div className="flex items-center gap-2 mb-3">
-        <div className="relative flex-1 max-w-sm"><Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/50" strokeWidth={1.5} /><input type="text" placeholder="搜索..." value={q} onChange={e => setQ(e.target.value)} className="w-full pl-8 pr-2 py-1.5 rounded-lg bg-secondary/60 text-sm placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-primary/30" /></div>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="relative flex-1 min-w-[120px] max-w-sm"><Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/50" strokeWidth={1.5} /><input type="text" placeholder="搜索..." value={q} onChange={e => setQ(e.target.value)} className="w-full pl-8 pr-2 py-1.5 rounded-lg bg-secondary/60 text-sm placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-primary/30" /></div>
         <select value={pf} onChange={e => setPf(e.target.value)} className="px-2 py-1.5 rounded-lg bg-secondary/60 text-sm text-xs focus:outline-none">{["all", ...projects].map(p => <option key={p} value={p}>{getProj(p)}</option>)}</select>
         <select value={df} onChange={e => setDf(e.target.value)} className="px-2 py-1.5 rounded-lg bg-secondary/60 text-sm text-xs focus:outline-none">{["all", ...devices.map(d => d.machineId)].map(v => <option key={v} value={v}>{v === "all" ? "全部设备" : devices.find(d => d.machineId === v)?.hostname}</option>)}</select>
+        <select value={sf} onChange={e => setSf(e.target.value)} className="px-2 py-1.5 rounded-lg bg-secondary/60 text-sm text-xs focus:outline-none">
+          <option value="all">全部来源</option>
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+        </select>
       </div>
 
       {/* Content */}
@@ -436,6 +518,8 @@ export function ClaudeHistory() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                       {s.categories?.map(c => <span key={c} className={cn("px-1.5 py-0.5 rounded text-[10px] font-medium", CAT_COLORS[c] || "bg-muted/30")}>{c}</span>)}
+                      {s.source === "codex" && <span className="inline-flex items-center gap-0.5 text-[10px] px-1 py-0.5 rounded bg-chart-3/15 text-chart-3"><Code2 className="w-2.5 h-2.5" strokeWidth={1.5} />Codex</span>}
+                      {s.source === "claude" && <span className="inline-flex items-center gap-0.5 text-[10px] px-1 py-0.5 rounded bg-chart-1/15 text-chart-1"><Bot className="w-2.5 h-2.5" strokeWidth={1.5} />Claude</span>}
                       <span className="text-[10px] text-muted-foreground font-mono flex items-center gap-0.5"><Calendar className="w-2.5 h-2.5" strokeWidth={1.5} />{fmtDate(s.startTime)}</span>
                       {s.deviceName && s.deviceName !== "awberry" && <span className="inline-flex items-center gap-0.5 text-[10px] px-1 py-0.5 rounded bg-chart-3/10 text-chart-3"><Monitor className="w-2.5 h-2.5" strokeWidth={1.5} />{s.deviceName}</span>}
                     </div>
@@ -447,7 +531,7 @@ export function ClaudeHistory() {
                       {s.behavior?.dominantStyle && <span>{STYLE_ICONS[s.behavior.dominantStyle]} {s.behavior.dominantStyle}</span>}
                     </div>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-muted-foreground/40 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-1" strokeWidth={1.5} />
+                  <ChevronRight className="w-4 h-4 text-muted-foreground/40 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0 mt-1" strokeWidth={1.5} />
                 </div>
               </button>
             ))}
@@ -512,7 +596,7 @@ export function ClaudeHistory() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className={cn("text-[10px] font-medium", msg.role === "user" ? "text-primary/70" : "text-chart-1/70")}>{msg.role === "user" ? "你" : "Claude"}</span>
+                      <span className={cn("text-[10px] font-medium", msg.role === "user" ? "text-primary/70" : "text-chart-1/70")}>{msg.role === "user" ? "你" : sel.source === "codex" ? "Codex" : "Claude"}</span>
                       <span className="text-[9px] text-muted-foreground/40 font-mono">{msg.timestamp ? fmtTime(msg.timestamp) : ""}</span>
                       {msg.hostname && msg.hostname !== "awberry" && <span className="text-[9px] text-muted-foreground/40">· {msg.hostname}</span>}
                     </div>
@@ -520,6 +604,18 @@ export function ClaudeHistory() {
                   </div>
                 </div>
               ))}
+              {sel.media && sel.media.length > 0 && (
+                <div className="pt-3 border-t border-border/40">
+                  <p className="text-[10px] text-muted-foreground mb-2 flex items-center gap-1"><ImageIcon className="w-3 h-3" strokeWidth={1.5} />生成图片 ({sel.media.length})</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {sel.media.map((m, i) => (
+                      <a key={i} href={m.url} target="_blank" rel="noreferrer" className="relative aspect-video rounded-lg overflow-hidden bg-secondary/50 border border-border/40 hover:border-primary/30 transition-colors">
+                        <img src={m.url} alt={m.filename} className="w-full h-full object-cover" loading="lazy" />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -154,12 +154,12 @@ export function HostStatusBar() {
       }
 
   return (
-    <div className="relative">
+    <div className="relative host-status-bar">
       {/* Main Status Bar — full width, hairline divider beneath */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
         className={cn(
-          "w-full flex items-center justify-center gap-x-3 px-4 sm:px-8 h-11",
+          "w-full flex items-center justify-center gap-x-2 sm:gap-x-3 px-3 sm:px-8 h-11",
           "border-b border-border bg-background/80 backdrop-blur-sm",
           "hover:bg-secondary/40 transition-colors cursor-pointer",
         )}
@@ -171,7 +171,7 @@ export function HostStatusBar() {
         )} />
 
         {/* Inline metrics, monospace numbers */}
-        <div className="flex items-center gap-x-2 text-sm text-muted-foreground font-mono overflow-x-auto whitespace-nowrap">
+        <div className="flex items-center gap-x-2 text-sm text-muted-foreground font-mono overflow-x-auto whitespace-nowrap scrollbar-hide">
           <span>
             CPU <span className="text-foreground">{displayStats.cpu}%</span>
           </span>
@@ -238,53 +238,55 @@ export function HostStatusBar() {
             </div>
 
             {/* Process Table */}
-            <div className="overflow-auto max-h-64">
-              {loadingProcesses ? (
-                <div className="py-8 text-center text-sm text-muted-foreground">加载中...</div>
-              ) : (
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-muted-foreground">
-                      <th className="pb-2 font-medium font-mono">PID</th>
-                      <th className="pb-2 font-medium">进程名</th>
-                      <th className="pb-2 font-medium text-right">CPU</th>
-                      <th className="pb-2 font-medium text-right">内存</th>
-                      <th className="pb-2 font-medium text-right">运行时间</th>
-                      <th className="pb-2 font-medium text-right">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredProcesses.map((process) => (
-                      <tr key={process.pid} className="border-t border-border/60 hover:bg-secondary/40 transition-colors">
-                        <td className="py-2 font-mono text-muted-foreground">{process.pid}</td>
-                        <td className="py-2 font-mono">{process.name}</td>
-                        <td className="py-2 text-right font-mono">
-                          <span className={cn(process.cpu > 10 ? "text-warning" : "text-foreground")}>
-                            {process.cpu.toFixed(1)}%
-                          </span>
-                        </td>
-                        <td className="py-2 text-right font-mono text-muted-foreground">{formatBytes(process.memory)}</td>
-                        <td className="py-2 text-right font-mono text-muted-foreground">{process.runtime}</td>
-                        <td className="py-2 text-right">
-                          <button
-                            onClick={() => killProcess(process.pid)}
-                            className="px-2 py-1 text-sm text-destructive hover:bg-destructive/10 rounded-md transition-colors"
-                          >
-                            终止
-                          </button>
-                        </td>
+            <div className="overflow-x-auto -mx-4 sm:mx-0 max-h-64">
+              <div className="min-w-[640px] px-4 sm:px-0">
+                {loadingProcesses ? (
+                  <div className="py-8 text-center text-sm text-muted-foreground">加载中...</div>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-muted-foreground">
+                        <th className="pb-2 font-medium font-mono">PID</th>
+                        <th className="pb-2 font-medium">进程名</th>
+                        <th className="pb-2 font-medium text-right">CPU</th>
+                        <th className="pb-2 font-medium text-right">内存</th>
+                        <th className="pb-2 font-medium text-right">运行时间</th>
+                        <th className="pb-2 font-medium text-right">操作</th>
                       </tr>
-                    ))}
-                    {filteredProcesses.length === 0 && (
-                      <tr>
-                        <td colSpan={6} className="py-8 text-center text-muted-foreground">
-                          无匹配进程
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              )}
+                    </thead>
+                    <tbody>
+                      {filteredProcesses.map((process) => (
+                        <tr key={process.pid} className="border-t border-border/60 hover:bg-secondary/40 transition-colors">
+                          <td className="py-2 font-mono text-muted-foreground">{process.pid}</td>
+                          <td className="py-2 font-mono">{process.name}</td>
+                          <td className="py-2 text-right font-mono">
+                            <span className={cn(process.cpu > 10 ? "text-warning" : "text-foreground")}>
+                              {process.cpu.toFixed(1)}%
+                            </span>
+                          </td>
+                          <td className="py-2 text-right font-mono text-muted-foreground">{formatBytes(process.memory)}</td>
+                          <td className="py-2 text-right font-mono text-muted-foreground">{process.runtime}</td>
+                          <td className="py-2 text-right">
+                            <button
+                              onClick={() => killProcess(process.pid)}
+                              className="px-2 py-1 text-sm text-destructive hover:bg-destructive/10 rounded-md transition-colors"
+                            >
+                              终止
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {filteredProcesses.length === 0 && (
+                        <tr>
+                          <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                            无匹配进程
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             </div>
           </div>
         </div>

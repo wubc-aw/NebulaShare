@@ -279,7 +279,7 @@ export default function DashboardPage() {
                     <span className="text-sm font-medium truncate ml-auto">{mihomo.effective_node}</span>
                   </div>
                 )}
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="px-3 py-2 rounded-lg bg-secondary/30">
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-0.5">
                       <Activity className="w-3 h-3" strokeWidth={1.5} />
@@ -299,9 +299,9 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-3 text-xs text-muted-foreground px-1">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3 text-xs text-muted-foreground px-1">
                   <span>总上行 {fmtBytes(mihomo.upload_total || 0)}</span>
-                  <span>·</span>
+                  <span className="hidden sm:inline opacity-40">·</span>
                   <span>总下行 {fmtBytes(mihomo.download_total || 0)}</span>
                 </div>
               </div>

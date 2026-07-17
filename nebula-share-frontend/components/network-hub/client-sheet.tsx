@@ -206,6 +206,9 @@ export function ClientSheet({
               <span>{client?.connections || 0} 连接</span>
               <span>最近: {route?.host_recent || "-"}</span>
             </div>
+            <p className="text-xs text-muted-foreground/60 mt-3 leading-relaxed">
+              提示：切换节点后，已建立的连接不会立即迁移，通常需要等待应用重新连接或重启设备后才会显示新节点。
+            </p>
           </div>
 
           {/* Client overrides */}

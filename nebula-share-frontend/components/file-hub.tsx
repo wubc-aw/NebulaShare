@@ -107,13 +107,13 @@ function Tabs({
   onChange: (id: string) => void
 }) {
   return (
-    <div className="inline-flex items-center gap-0.5 rounded-xl bg-secondary/60 p-1">
+    <div className="inline-flex items-center gap-0.5 rounded-xl bg-secondary/60 p-1 overflow-x-auto max-w-full scrollbar-hide">
       {tabs.map((tab) => (
         <button
           key={tab.id}
           onClick={() => onChange(tab.id)}
           className={cn(
-            "px-3.5 py-1.5 text-sm rounded-lg transition-colors",
+            "px-3.5 py-1.5 text-sm rounded-lg transition-colors whitespace-nowrap shrink-0",
             active === tab.id
               ? "bg-card text-foreground shadow-card"
               : "text-muted-foreground hover:text-foreground",
@@ -367,7 +367,7 @@ export function FileHub() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">文件中心</h2>
           <p className="text-sm text-muted-foreground mt-1">快速交换与长期存储</p>
@@ -460,25 +460,25 @@ export function FileHub() {
                     <div
                       key={file.id}
                       className={cn(
-                        "flex items-center justify-between py-3 group transition-colors rounded-lg px-2 -mx-2 hover:bg-secondary/50",
+                        "flex flex-col sm:flex-row sm:items-center sm:justify-between py-3 group transition-colors rounded-lg px-2 -mx-2 hover:bg-secondary/50 gap-2",
                         i !== 0 && "border-t border-border/60",
                       )}
                     >
-                      <div className="flex items-center gap-3">
-                        <Icon className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                        <div>
-                          <p className="text-sm font-medium">{file.name}</p>
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Icon className="w-4 h-4 text-muted-foreground shrink-0" strokeWidth={1.5} />
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{file.name}</p>
                           <p className="text-sm text-muted-foreground font-mono mt-0.5">
                             {file.size} · {file.uploadTime}
                           </p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center justify-between sm:justify-end gap-3">
                         <div className="flex items-center gap-1 text-sm text-muted-foreground font-mono">
                           <Clock className="w-3 h-3" strokeWidth={1.5} />
                           {file.expiresIn}
                         </div>
-                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex items-center gap-0.5 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                           <button
                             onClick={() => handleDownload(file.name)}
                             className="p-1.5 hover:bg-accent rounded-lg transition-colors"
@@ -604,7 +604,7 @@ export function FileHub() {
             )}
 
             {!storageLoading && !storageError && storageItems.length > 0 && (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
                 {storageItems.map((item) =>
                   item.type === "dir" ? (
                     <button
@@ -627,7 +627,7 @@ export function FileHub() {
                       })()}
                       <p className="text-sm font-medium truncate">{item.name}</p>
                       <p className="text-sm text-muted-foreground font-mono mt-0.5">{item.size_human}</p>
-                      <button className="absolute top-2 right-2 p-1 opacity-0 group-hover:opacity-100 hover:bg-accent rounded-md transition-all">
+                      <button className="absolute top-2 right-2 p-1 sm:opacity-0 sm:group-hover:opacity-100 hover:bg-accent rounded-md transition-all">
                         <MoreHorizontal className="w-4 h-4" strokeWidth={1.5} />
                       </button>
                     </div>

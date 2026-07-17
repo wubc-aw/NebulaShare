@@ -18,7 +18,7 @@
   font-display: swap;
 }
 
-@custom-variant dark (&:is(.dark *));
+@custom-variant dark (&:is(.dark *, .tron *, .vivid *));
 
 @theme inline {
   --font-heading: var(--font-sans);
@@ -194,6 +194,15 @@
   background: var(--muted-foreground);
 }
 
+/* Hide scrollbar utility */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
 /* ─── Premium card with blue glow ──────────────────────── */
 .card-premium {
   background: var(--card);
@@ -304,4 +313,375 @@
   background-position: 0 0, 0 100%, 0 0, 100% 0;
   background-repeat: no-repeat;
   animation: dash-flow 0.6s linear infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Theme 3 · VIVID — 鲜艳潮流 / 设计感（hot pink × violet × cyan）
+   ═══════════════════════════════════════════════════════════ */
+.vivid {
+  --background: #140826;
+  --foreground: #fdf4ff;
+  --card: #1e0e3a;
+  --card-foreground: #fdf4ff;
+  --popover: #26134a;
+  --popover-foreground: #fdf4ff;
+  --primary: #ff2e9a;
+  --primary-foreground: #ffffff;
+  --secondary: #2c1660;
+  --secondary-foreground: #d8ccff;
+  --muted: #2c1660;
+  --muted-foreground: #9d8bd0;
+  --accent: #3d1e7e;
+  --accent-foreground: #22d3ee;
+  --destructive: #ff4d5e;
+  --destructive-foreground: #ffffff;
+  --border: rgba(255, 46, 154, 0.18);
+  --input: rgba(255, 46, 154, 0.12);
+  --ring: #ff2e9a;
+  --success: #a3e635;
+  --success-foreground: #1a2e05;
+  --warning: #fb923c;
+  --warning-foreground: #431407;
+  --chart-1: #ff2e9a;
+  --chart-2: #22d3ee;
+  --chart-3: #a3e635;
+  --chart-4: #fb923c;
+  --chart-5: #8b5cf6;
+  --radius: 1.25rem;
+  --sidebar: #1a0b33;
+  --sidebar-foreground: #fdf4ff;
+  --sidebar-primary: #ff2e9a;
+  --sidebar-primary-foreground: #ffe3f2;
+  --sidebar-accent: #3d1e7e;
+  --sidebar-accent-foreground: #22d3ee;
+  --sidebar-border: rgba(255, 46, 154, 0.16);
+  --sidebar-ring: #ff2e9a;
+  --shadow-card:
+    0 0 0 1px rgba(255, 46, 154, 0.10),
+    0 4px 16px rgba(0, 0, 0, 0.45),
+    0 12px 40px rgba(124, 58, 237, 0.15);
+  --shadow-pop:
+    0 0 0 1px rgba(255, 46, 154, 0.22),
+    0 8px 24px rgba(0, 0, 0, 0.5),
+    0 24px 64px rgba(255, 46, 154, 0.18);
+  --shadow-glow: 0 0 28px rgba(255, 46, 154, 0.28);
+}
+
+/* Vivid chrome */
+.vivid .card-premium:hover {
+  transform: translateY(-2px);
+}
+.vivid .section-header {
+  background: linear-gradient(90deg, #ff2e9a, #8b5cf6, #22d3ee);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.vivid main h1 {
+  background: linear-gradient(92deg, #ff2e9a 0%, #c026d3 45%, #22d3ee 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.vivid .node-chip.active {
+  background: linear-gradient(135deg, #ff2e9a, #8b5cf6);
+  color: #ffffff;
+  border-color: transparent;
+  box-shadow: 0 0 18px rgba(255, 46, 154, 0.4);
+}
+.vivid .glow-blue {
+  box-shadow: 0 0 24px rgba(255, 46, 154, 0.3);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Theme 4 · TRON — 线条科技（palette lifted from agent-terminal）
+   bg #05080d · panel #0a1318 · accent #aacfd1 (170,207,209)
+   square 1px borders · dashed separators · glow · mono data
+   ═══════════════════════════════════════════════════════════ */
+.tron {
+  --background: #05080d;
+  --foreground: #aacfd1;
+  --card: #0a1318;
+  --card-foreground: #d8eef0;
+  --popover: #0a1318;
+  --popover-foreground: #d8eef0;
+  --primary: #aacfd1;
+  --primary-foreground: #05080d;
+  --secondary: rgba(170, 207, 209, 0.06);
+  --secondary-foreground: #aacfd1;
+  --muted: #0a1318;
+  --muted-foreground: #4a6566;
+  --accent: rgba(170, 207, 209, 0.10);
+  --accent-foreground: #d8eef0;
+  --destructive: #ff5555;
+  --destructive-foreground: #ffffff;
+  --border: rgba(170, 207, 209, 0.16);
+  --input: rgba(170, 207, 209, 0.10);
+  --ring: #aacfd1;
+  --success: #50fa7b;
+  --success-foreground: #05080d;
+  --warning: #ffb86c;
+  --warning-foreground: #05080d;
+  --chart-1: #aacfd1;
+  --chart-2: #8be9fd;
+  --chart-3: #50fa7b;
+  --chart-4: #ffb86c;
+  --chart-5: #bd93f9;
+  --radius: 0.125rem;
+  --sidebar: #0a1318;
+  --sidebar-foreground: #aacfd1;
+  --sidebar-primary: #aacfd1;
+  --sidebar-primary-foreground: #d8eef0;
+  --sidebar-accent: rgba(170, 207, 209, 0.10);
+  --sidebar-accent-foreground: #d8eef0;
+  --sidebar-border: rgba(170, 207, 209, 0.25);
+  --sidebar-ring: #aacfd1;
+  --shadow-card:
+    inset 0 0 14px rgba(170, 207, 209, 0.03),
+    0 0 0 1px rgba(170, 207, 209, 0.10);
+  --shadow-pop:
+    0 0 0 1px rgba(170, 207, 209, 0.28),
+    0 0 24px rgba(170, 207, 209, 0.10),
+    0 24px 80px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 20px rgba(170, 207, 209, 0.22);
+}
+
+/* Tron global chrome */
+html.tron body {
+  letter-spacing: 0.04em;
+}
+.tron ::-webkit-scrollbar-thumb {
+  border-radius: 0;
+}
+.tron .card-premium {
+  border-radius: 2px;
+  border: 1px solid rgba(170, 207, 209, 0.18);
+}
+.tron .card-premium:hover {
+  box-shadow:
+    inset 0 0 14px rgba(170, 207, 209, 0.05),
+    0 0 0 1px rgba(170, 207, 209, 0.30),
+    0 0 20px rgba(170, 207, 209, 0.14);
+}
+.tron .section-header {
+  color: var(--primary);
+  letter-spacing: 0.3em;
+  text-shadow: 0 0 6px rgba(170, 207, 209, 0.3);
+}
+.tron .section-header::before {
+  content: '// ';
+  color: var(--muted-foreground);
+}
+.tron main h1 {
+  color: #d8eef0;
+  letter-spacing: 0.18em;
+  text-shadow:
+    0 0 10px rgba(170, 207, 209, 0.45),
+    0 0 34px rgba(170, 207, 209, 0.28);
+}
+.tron .node-chip {
+  border-radius: 2px;
+  letter-spacing: 0.12em;
+}
+.tron .node-chip.active {
+  background: var(--primary);
+  color: #05080d;
+  border-color: transparent;
+  box-shadow: 0 0 14px rgba(170, 207, 209, 0.35);
+}
+.tron .glow-blue {
+  box-shadow: 0 0 24px rgba(170, 207, 209, 0.18);
+}
+
+/* Tron sidebar — left status-rail aesthetic */
+.tron .app-sidebar {
+  font-family: var(--font-mono);
+}
+.tron .app-sidebar .brand-name {
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--primary);
+  text-shadow: 0 0 10px rgba(170, 207, 209, 0.4);
+}
+.tron .app-sidebar nav a,
+.tron .app-sidebar nav button {
+  border-radius: 2px;
+  letter-spacing: 0.12em;
+}
+.tron .app-sidebar nav a .nav-label,
+.tron .app-sidebar nav button .nav-label {
+  font-size: 12px;
+}
+.tron .app-sidebar .active-bar {
+  background: var(--primary);
+  border-radius: 0;
+  box-shadow: 0 0 8px rgba(170, 207, 209, 0.7);
+}
+.tron .app-sidebar nav kbd {
+  border-radius: 0;
+}
+.tron .host-status-bar > button {
+  border-bottom: 1px dashed rgba(170, 207, 209, 0.24);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Theme backdrops — rendered by <ThemeBackdrop/>, gated by theme
+   ═══════════════════════════════════════════════════════════ */
+.theme-backdrop {
+  display: none;
+}
+.vivid .theme-backdrop,
+.tron .theme-backdrop {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.vivid .app-shell-root,
+.tron .app-shell-root {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+/* Vivid aurora blobs */
+.backdrop-vivid {
+  position: absolute;
+  inset: 0;
+}
+.tron .backdrop-vivid {
+  display: none;
+}
+.vivid-blob {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.32;
+  will-change: transform;
+}
+.vivid-blob-1 {
+  width: 46vw;
+  height: 46vw;
+  background: #ff2e9a;
+  top: -14%;
+  right: -10%;
+  animation: vivid-float-1 26s ease-in-out infinite;
+}
+.vivid-blob-2 {
+  width: 40vw;
+  height: 40vw;
+  background: #22d3ee;
+  bottom: -16%;
+  left: -8%;
+  opacity: 0.22;
+  animation: vivid-float-2 32s ease-in-out infinite;
+}
+.vivid-blob-3 {
+  width: 34vw;
+  height: 34vw;
+  background: #7c3aed;
+  top: 32%;
+  left: 38%;
+  opacity: 0.28;
+  animation: vivid-float-3 38s ease-in-out infinite;
+}
+@keyframes vivid-float-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-7vw, 9vh) scale(1.18); }
+}
+@keyframes vivid-float-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(8vw, -7vh) scale(1.12); }
+}
+@keyframes vivid-float-3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-5vw, -6vh) scale(0.9); }
+}
+
+/* Tron scrolling background — drifting line grids + v0-style marquee */
+.backdrop-tron {
+  position: absolute;
+  inset: 0;
+}
+.vivid .backdrop-tron {
+  display: none;
+}
+.tron-grid {
+  position: absolute;
+  inset: -200px;
+  background-image:
+    linear-gradient(rgba(170, 207, 209, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(170, 207, 209, 0.055) 1px, transparent 1px);
+  background-size: 46px 46px;
+  animation: tron-grid-drift 14s linear infinite;
+  will-change: transform;
+}
+.tron-grid-lg {
+  background-image:
+    linear-gradient(rgba(170, 207, 209, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(170, 207, 209, 0.035) 1px, transparent 1px);
+  background-size: 184px 184px;
+  animation: tron-grid-drift-reverse 46s linear infinite;
+}
+@keyframes tron-grid-drift {
+  to { transform: translate(46px, 46px); }
+}
+@keyframes tron-grid-drift-reverse {
+  to { transform: translate(-184px, -184px); }
+}
+.tron-marquee {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  white-space: nowrap;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  user-select: none;
+}
+.tron-marquee span {
+  display: inline-block;
+  padding-right: 2.5em;
+  animation: tron-marquee-scroll 42s linear infinite;
+  will-change: transform;
+}
+.tron-marquee-reverse span {
+  animation-direction: reverse;
+  animation-duration: 58s;
+}
+@keyframes tron-marquee-scroll {
+  to { transform: translateX(-100%); }
+}
+/* Big outlined headline row — v0-optimus style */
+.tron-marquee-hero {
+  top: 16%;
+  font-size: 13vh;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: transparent;
+  -webkit-text-stroke: 1px rgba(170, 207, 209, 0.10);
+}
+/* Small dim data rows */
+.tron-marquee-top {
+  top: 3%;
+  font-size: 11px;
+  letter-spacing: 0.35em;
+  color: rgba(170, 207, 209, 0.12);
+}
+.tron-marquee-bottom {
+  bottom: 4%;
+  font-size: 11px;
+  letter-spacing: 0.35em;
+  color: rgba(170, 207, 209, 0.10);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tron-grid,
+  .tron-marquee span,
+  .vivid-blob {
+    animation: none;
+  }
 }

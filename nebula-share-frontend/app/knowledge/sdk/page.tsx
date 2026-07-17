@@ -168,7 +168,7 @@ export default function SdkKnowledgePage() {
       )}
 
       {/* Tabs - 4 Dimensions */}
-      <div className="flex gap-1 mb-3 bg-secondary/50 p-1 rounded-lg w-fit">
+      <div className="flex gap-1 mb-3 bg-secondary/50 p-1 rounded-lg overflow-x-auto scrollbar-hide w-full sm:w-fit">
         {[
           { id: "graph" as const, label: "关系图谱" },
           { id: "business" as const, label: `业务逻辑 (${stats?.businessLogic || 0})` },
@@ -183,7 +183,7 @@ export default function SdkKnowledgePage() {
               setHighlightNodeId(null)
             }}
             className={cn(
-              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0",
               activeTab === tab.id
                 ? "bg-card text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground"
@@ -216,9 +216,9 @@ export default function SdkKnowledgePage() {
             </div>
 
             {/* Graph + Navigation */}
-            <div className="flex-1 flex min-h-0">
+            <div className="flex-1 flex flex-col lg:flex-row min-h-0">
               {/* Graph */}
-              <div className="flex-1 min-w-0 p-3">
+              <div className="flex-1 min-w-0 min-h-[300px] lg:min-h-0 p-3">
                 <div className="w-full h-full rounded-xl border border-border/40 overflow-hidden">
                   <KnowledgeGraph
                     data={data}
@@ -231,7 +231,7 @@ export default function SdkKnowledgePage() {
 
               {/* Right Navigation Panel */}
               {navOpen && (
-                <div className="w-64 shrink-0 border-l border-border/30 overflow-auto">
+                <div className="w-full lg:w-64 shrink-0 border-t lg:border-t-0 lg:border-l border-border/30 overflow-auto max-h-[240px] lg:max-h-none">
                   <div className="p-3 space-y-3">
                     <p className="text-xs font-medium text-muted-foreground px-1">节点导航</p>
                     {DIMENSION_CONFIG.map((dim) => {

@@ -243,8 +243,8 @@ export function ArticleReader({ article, onClose, onUpdate }: ArticleReaderProps
         </div>
 
         {/* Action bar */}
-        <div className="flex items-center justify-between px-5 py-3 border-t border-border/60 shrink-0 gap-2">
-          <div className="flex items-center gap-1">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between px-5 py-3 border-t border-border/60 shrink-0 gap-3">
+          <div className="flex items-center gap-1 flex-wrap">
             <button
               onClick={handleToggleRead}
               className={cn(
