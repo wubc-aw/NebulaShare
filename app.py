@@ -8,6 +8,9 @@ import json
 import shutil
 import socket
 import base64
+import zipfile
+import glob
+import re
 import threading
 import subprocess
 import tempfile
@@ -15,7 +18,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from io import BytesIO
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, request, send_file, send_from_directory, jsonify, Response, stream_with_context
 from werkzeug.utils import safe_join
@@ -52,7 +55,9 @@ MIHOMO_TIMEOUT_MS = 3000
 NEBULA_STATE_DIR = os.environ.get("NEBULA_STATE_DIR",
                                   os.path.expanduser("~/.config/nebulashare"))
 MIHOMO_STATE_FILE = os.path.join(NEBULA_STATE_DIR, "mihomo.json")
+SKILLS_DIR = os.path.join(NEBULA_STATE_DIR, "skills")
 os.makedirs(NEBULA_STATE_DIR, exist_ok=True)
+os.makedirs(SKILLS_DIR, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -816,12 +821,26 @@ def mihomo_status():
     sub_url = state.get("subscription_url", "")
     last_update = state.get("last_update", 0)
 
-    # Determine effective node from GLOBAL selector
+    # Determine effective node based on routing mode:
+    # - global mode -> GLOBAL selector
+    # - rule mode -> catch-all Final group (or GLOBAL as fallback)
+    # - direct mode -> None
     effective_node = None
+    mode = cfg.get("mode") if isinstance(cfg, dict) else None
     if isinstance(proxies, dict) and "_error" not in proxies:
-        global_proxy = proxies.get("proxies", {}).get("GLOBAL") or {}
-        if global_proxy.get("type") in ("Selector", "URLTest", "Fallback", "LoadBalance"):
-            effective_node = global_proxy.get("now")
+        all_proxies = proxies.get("proxies", {})
+        if mode == "global":
+            target = all_proxies.get("GLOBAL") or {}
+        else:
+            target = None
+            for name, p in all_proxies.items():
+                if "final" in name.lower() and p.get("type") in ("Selector", "URLTest", "Fallback", "LoadBalance"):
+                    target = p
+                    break
+            if not target:
+                target = all_proxies.get("GLOBAL") or {}
+        if target.get("type") in ("Selector", "URLTest", "Fallback", "LoadBalance"):
+            effective_node = target.get("now")
 
     return jsonify({
         "ok": True,
@@ -2658,13 +2677,15 @@ os.makedirs(CLAUDE_DEVICES_DIR, exist_ok=True)
 
 
 def _load_all_devices_data():
-    """加载所有设备的历史数据并合并"""
+    """加载所有设备的历史数据并合并（支持 Claude Code 与 Codex）"""
     all_sessions = []
     all_projects = {}
     devices_info = {}
+    device_sources = {}
     total_messages = 0
     all_categories = {}
     all_styles = {}
+    source_stats = {}
     total_tokens = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0, "estimatedCostUSD": 0.0}
 
     # 加载设备历史数据：合并 devices/（API 上传）和 data/ 根目录（Git 同步）
@@ -2708,10 +2729,12 @@ def _load_all_devices_data():
             "sessions": meta.get("totalSessions", 0),
             "messages": meta.get("totalMessages", 0),
         }
+        device_sources.setdefault(device_id, {"sources": {}, "projects": {}})
 
         # 合并项目统计
         for proj, count in meta.get("projects", {}).items():
             all_projects[proj] = all_projects.get(proj, 0) + count
+            device_sources[device_id]["projects"][proj] = device_sources[device_id]["projects"].get(proj, 0) + count
 
         # 合并分类和风格统计
         for cat, count in meta.get("categoryDistribution", {}).items():
@@ -2727,8 +2750,14 @@ def _load_all_devices_data():
 
         # 为每条会话和消息标记设备来源
         for session in data.get("sessions", []):
+            session.setdefault("source", "claude")
             session["deviceId"] = device_id
             session["deviceName"] = device_name
+            source_stats[session["source"]] = source_stats.get(session["source"], 0) + 1
+            src_key = session["source"]
+            device_sources[device_id]["sources"].setdefault(src_key, {"sessions": 0, "messages": 0})
+            device_sources[device_id]["sources"][src_key]["sessions"] += 1
+            device_sources[device_id]["sources"][src_key]["messages"] += session.get("messageCount", 0)
             for msg in session.get("messages", []):
                 msg.setdefault("machineId", device_id)
                 msg.setdefault("hostname", device_name)
@@ -2746,9 +2775,11 @@ def _load_all_devices_data():
             "projects": all_projects,
             "devices": devices_info,
             "deviceCount": len(devices_info),
+            "deviceSources": device_sources,
             "categoryDistribution": all_categories,
             "styleDistribution": all_styles,
             "totalTokens": total_tokens,
+            "sources": source_stats,
         },
         "sessions": all_sessions,
     }
@@ -2756,9 +2787,21 @@ def _load_all_devices_data():
 
 @app.route("/api/claude-history")
 def claude_history():
-    """返回所有设备的 Claude Code 历史会话数据（合并视图）"""
+    """返回所有设备的历史会话数据（Claude Code 与 Codex 合并视图）"""
     data = _load_all_devices_data()
     return jsonify(data)
+
+
+@app.route("/history-media/<hostname>/<session_id>/<filename>")
+def history_media(hostname, session_id, filename):
+    """提供历史会话中的图片等媒体文件"""
+    safe_hostname = "".join(c for c in hostname if c.isalnum() or c in "-_").strip("-_")
+    safe_session_id = "".join(c for c in session_id if c.isalnum() or c in "-")
+    safe_filename = os.path.basename(filename)
+    if not safe_hostname or not safe_session_id or not safe_filename:
+        return jsonify({"ok": False, "error": "invalid path"}), 400
+    media_dir = os.path.join(CLAUDE_HISTORY_DIR, "media", safe_hostname, safe_session_id)
+    return send_from_directory(media_dir, safe_filename)
 
 
 @app.route("/api/claude-history/sync", methods=["POST"])
@@ -2860,7 +2903,7 @@ def claude_history_devices():
 
 @app.route("/api/claude-history/upload", methods=["POST"])
 def claude_history_upload():
-    """接收其他电脑上传的 Claude 历史数据文件 (ZIP/JSON/JSONL)"""
+    """接收其他设备上传的历史数据文件 (ZIP/JSON/JSONL)，支持 Claude Code 与 Codex 混包"""
     import zipfile
     import shutil
 
@@ -2879,6 +2922,31 @@ def claude_history_upload():
     upload_tmp = os.path.join("/tmp", f"claude-upload-{hostname}-{int(time.time())}")
     os.makedirs(upload_tmp, exist_ok=True)
 
+    def _save_index(hostname, sessions_count, messages_count):
+        index_file = os.path.join(CLAUDE_DEVICES_DIR, "index.json")
+        index_data = {}
+        if os.path.isfile(index_file):
+            try:
+                with open(index_file, encoding="utf-8") as fp:
+                    index_data = json.load(fp)
+            except Exception:
+                pass
+        index_data[hostname] = {
+            "lastSync": datetime.now().isoformat(),
+            "sessions": sessions_count,
+            "messages": messages_count,
+            "file": f"history-{hostname}.json",
+        }
+        with open(index_file, "w", encoding="utf-8") as fp:
+            json.dump(index_data, fp, ensure_ascii=False, indent=2)
+
+    def _find_files(root, name):
+        found = []
+        for dirpath, _dirnames, filenames in os.walk(root):
+            if name in filenames:
+                found.append(os.path.join(dirpath, name))
+        return found
+
     try:
         filename = f.filename.lower()
 
@@ -2895,23 +2963,67 @@ def claude_history_upload():
         else:
             return jsonify({"ok": False, "error": "unsupported format, use .zip/.json/.jsonl"}), 400
 
-        def find_file(root, name):
-            for dirpath, _dirnames, filenames in os.walk(root):
-                if name in filenames:
-                    return os.path.join(dirpath, name)
-            return None
-
-        history_file = find_file(upload_tmp, "history.json") or find_file(upload_tmp, "history.jsonl")
-        if not history_file:
-            return jsonify({"ok": False, "error": "no history.json/jsonl found in upload"}), 400
-
-        dest_file = os.path.join(CLAUDE_DEVICES_DIR, f"history-{hostname}.json")
         os.makedirs(CLAUDE_DEVICES_DIR, exist_ok=True)
+        media_dir = os.path.join(CLAUDE_HISTORY_DIR, "media", hostname)
+        os.makedirs(media_dir, exist_ok=True)
 
-        if history_file.endswith(".jsonl"):
+        total_sessions = 0
+        total_messages = 0
+        merged_sessions = []
+        merged_meta = {
+            "generatedAt": datetime.now().isoformat(),
+            "machineInfo": {"hostname": hostname, "platform": "unknown"},
+            "projects": {},
+            "totalTokens": {"input": 0, "output": 0, "total": 0, "estimatedCostUSD": 0.0},
+        }
+
+        # 1. Handle Codex history.json (may include media references)
+        codex_files = _find_files(upload_tmp, "history.json")
+        for hist_path in codex_files:
+            # Skip sub-history.json files that are not codex export roots
+            with open(hist_path, encoding="utf-8") as fp:
+                try:
+                    hist_data = json.load(fp)
+                except Exception:
+                    continue
+            sessions = hist_data.get("sessions", [])
+            if not sessions:
+                continue
+            # Heuristic: if first session has source=codex, treat as codex export
+            sample_source = sessions[0].get("source", "claude")
+            if sample_source != "codex":
+                continue
+            # Copy referenced images into media dir
+            for s in sessions:
+                for m in s.get("media", []):
+                    src_url = m.get("url", "")
+                    if src_url.startswith("/history-media/"):
+                        parts = src_url.split("/")
+                        if len(parts) >= 5:
+                            _h, sid, fname = parts[2], parts[3], parts[4]
+                            src_dir = os.path.join(upload_tmp, "images", sid)
+                            src_file = os.path.join(src_dir, fname)
+                            if os.path.isfile(src_file):
+                                dest_dir = os.path.join(media_dir, sid)
+                                os.makedirs(dest_dir, exist_ok=True)
+                                shutil.copy2(src_file, os.path.join(dest_dir, fname))
+                                m["url"] = f"/history-media/{hostname}/{sid}/{fname}"
+            merged_sessions.extend(sessions)
+            total_sessions += len(sessions)
+            total_messages += sum(s.get("messageCount", 0) for s in sessions)
+            for proj, cnt in hist_data.get("meta", {}).get("projects", {}).items():
+                merged_meta["projects"][proj] = merged_meta["projects"].get(proj, 0) + cnt
+            toks = hist_data.get("meta", {}).get("totalTokens", {})
+            for k in ["input", "output", "total"]:
+                merged_meta["totalTokens"][k] += toks.get(k, 0)
+            merged_meta["totalTokens"]["estimatedCostUSD"] += toks.get("estimatedCostUSD", 0.0)
+
+        # 2. Handle Claude Code history.jsonl
+        jsonl_files = _find_files(upload_tmp, "history.jsonl")
+        for hist_path in jsonl_files:
             sessions = []
             session_msgs = {}
-            with open(history_file, encoding="utf-8") as fp:
+            with open(hist_path, encoding="utf-8") as fp:
                 for line in fp:
                     line = line.strip()
                     if not line:
@@ -2937,58 +3049,65 @@ def claude_history_upload():
                     "project": "/unknown",
                     "messageCount": len(msgs),
                     "messages": msgs,
+                    "source": "claude",
+                    "startTime": msgs[0]["timestamp"],
+                    "endTime": msgs[-1]["timestamp"],
                 })
-            output = {
-                "meta": {
-                    "generatedAt": datetime.now().isoformat(),
-                    "totalSessions": len(sessions),
-                    "totalMessages": sum(s["messageCount"] for s in sessions),
-                    "machineInfo": {"hostname": hostname, "platform": "unknown"},
-                },
-                "sessions": sessions,
-            }
-            with open(dest_file, "w", encoding="utf-8") as fp:
-                json.dump(output, fp, ensure_ascii=False, indent=2)
-        else:
-            shutil.copy2(history_file, dest_file)
+            merged_sessions.extend(sessions)
+            total_sessions += len(sessions)
+            total_messages += sum(s["messageCount"] for s in sessions)
+            merged_meta["projects"]["/unknown"] = merged_meta["projects"].get("/unknown", 0) + len(sessions)
+
+        # 3. Handle plain Claude Code history.json (legacy single-file upload)
+        if not merged_sessions:
+            history_file = None
+            for p in _find_files(upload_tmp, "history.json"):
+                with open(p, encoding="utf-8") as fp:
+                    try:
+                        data = json.load(fp)
+                        if data.get("sessions"):
+                            history_file = p
+                            break
+                    except Exception:
+                        continue
+            if history_file:
+                shutil.copy2(history_file, os.path.join(CLAUDE_DEVICES_DIR, f"history-{hostname}.json"))
+                with open(os.path.join(CLAUDE_DEVICES_DIR, f"history-{hostname}.json"), encoding="utf-8") as fp:
+                    saved = json.load(fp)
+                total_sessions = saved.get("meta", {}).get("totalSessions", 0)
+                total_messages = saved.get("meta", {}).get("totalMessages", 0)
+                _save_index(hostname, total_sessions, total_messages)
+                shutil.rmtree(upload_tmp, ignore_errors=True)
+                return jsonify({
+                    "ok": True,
+                    "message": f"Uploaded and saved for {hostname}",
+                    "hostname": hostname,
+                    "sessions": total_sessions,
+                })
+
+        if not merged_sessions:
+            return jsonify({"ok": False, "error": "no history.json/jsonl found in upload"}), 400
+
+        merged_meta["totalSessions"] = total_sessions
+        merged_meta["totalMessages"] = total_messages
+        merged_sessions.sort(key=lambda x: x.get("startTime", ""), reverse=True)
+        output = {
+            "meta": merged_meta,
+            "sessions": merged_sessions,
+        }
+        dest_file = os.path.join(CLAUDE_DEVICES_DIR, f"history-{hostname}.json")
+        with open(dest_file, "w", encoding="utf-8") as fp:
+            json.dump(output, fp, ensure_ascii=False, indent=2)
 
         shutil.rmtree(upload_tmp, ignore_errors=True)
-
-        index_file = os.path.join(CLAUDE_DEVICES_DIR, "index.json")
-        index_data = {}
-        if os.path.isfile(index_file):
-            try:
-                with open(index_file, encoding="utf-8") as fp:
-                    index_data = json.load(fp)
-            except Exception:
-                pass
-
-        try:
-            with open(dest_file, encoding="utf-8") as fp:
-                saved_data = json.load(fp)
-            meta = saved_data.get("meta", {})
-            index_data[hostname] = {
-                "lastSync": datetime.now().isoformat(),
-                "sessions": meta.get("totalSessions", 0),
-                "messages": meta.get("totalMessages", 0),
-                "file": f"history-{hostname}.json",
-            }
-        except Exception:
-            index_data[hostname] = {
-                "lastSync": datetime.now().isoformat(),
-                "sessions": 0,
-                "messages": 0,
-                "file": f"history-{hostname}.json",
-            }
-
-        with open(index_file, "w", encoding="utf-8") as fp:
-            json.dump(index_data, fp, ensure_ascii=False, indent=2)
+        _save_index(hostname, total_sessions, total_messages)
 
         return jsonify({
             "ok": True,
-            "message": f"Uploaded and saved for {hostname}",
+            "message": f"Uploaded and saved for {hostname}: {total_sessions} sessions, {total_messages} messages",
             "hostname": hostname,
-            "sessions": index_data[hostname].get("sessions", 0),
+            "sessions": total_sessions,
+            "messages": total_messages,
         })
 
     except Exception as e:
@@ -3175,47 +3294,7 @@ def claude_history_process():
             "durationMs": round((time.time() - step_start) * 1000),
         })
 
-    # Step 2: Build Graph
-    step_start = time.time()
-    try:
-        graph_path = os.path.join(CLAUDE_HISTORY_TOOLS_DIR, "extractor_graph.py")
-        if not os.path.isfile(graph_path):
-            result["steps"].append({
-                "name": "graph",
-                "status": "skipped",
-                "message": "extractor_graph.py not found",
-            })
-        else:
-            proc = subprocess.run(
-                [sys.executable, graph_path],
-                cwd=CLAUDE_HISTORY_TOOLS_DIR,
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            success = proc.returncode == 0
-            result["steps"].append({
-                "name": "graph",
-                "status": "done" if success else "error",
-                "message": f"exit={proc.returncode}, graph built" if success else f"exit={proc.returncode}: {proc.stderr[:200]}",
-                "durationMs": round((time.time() - step_start) * 1000),
-            })
-    except subprocess.TimeoutExpired:
-        result["steps"].append({
-            "name": "graph",
-            "status": "error",
-            "message": "timeout after 300s",
-            "durationMs": round((time.time() - step_start) * 1000),
-        })
-    except Exception as e:
-        result["steps"].append({
-            "name": "graph",
-            "status": "error",
-            "message": str(e),
-            "durationMs": round((time.time() - step_start) * 1000),
-        })
-
-    # Step 3: Analyze (optional - may take long)
+    # Step 2: Analyze (optional - may take long)
     step_start = time.time()
     try:
         analyzer_path = os.path.join(CLAUDE_HISTORY_TOOLS_DIR, "analyzer.py")
@@ -3606,6 +3685,221 @@ def mcp_tool(tool):
         return jsonify({"ok": False, "error": "解析结果失败", "raw": output}), 500
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── Skill Center ────────────────────────────────────────────────────
+
+
+def _skill_display_name(name):
+    """Strip .md extension for display."""
+    if name.endswith(".md"):
+        return name[:-3]
+    return name
+
+
+def _skill_metadata(skill_path, rel_name=None):
+    """Extract metadata from a skill directory or single .md file."""
+    name = rel_name or os.path.basename(skill_path)
+    if os.path.isfile(skill_path):
+        skill_file = skill_path
+    else:
+        skill_file = safe_join(skill_path, "SKILL.md")
+        if not skill_file or not os.path.isfile(skill_file):
+            for f in sorted(os.listdir(skill_path)):
+                if f.lower().endswith(".md"):
+                    skill_file = safe_join(skill_path, f)
+                    break
+    description = ""
+    if skill_file and os.path.isfile(skill_file):
+        try:
+            with open(skill_file, encoding="utf-8", errors="ignore") as f:
+                text = f.read(8192)
+            m = re.search(r'^---\s*\n(.*?)\n---\s*\n', text, re.DOTALL)
+            if m:
+                fm = m.group(1)
+                dm = re.search(r'^description:\s*(.+)$', fm, re.MULTILINE)
+                if dm:
+                    description = dm.group(1).strip().strip('"')
+            if not description:
+                body = text.split('---\n', 2)[-1]
+                for line in body.splitlines():
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        description = line[:160]
+                        break
+        except Exception:
+            pass
+    return {
+        "name": name,
+        "displayName": _skill_display_name(name),
+        "description": description or "无描述",
+    }
+
+
+def _build_skills_index():
+    """Build central skill inventory."""
+    skills = []
+    if not os.path.isdir(SKILLS_DIR):
+        return skills
+    for entry in sorted(os.listdir(SKILLS_DIR)):
+        if entry == "index.json":
+            continue
+        path = os.path.join(SKILLS_DIR, entry)
+        # Treat known category folders (commands, skills) as containers
+        if os.path.isdir(path) and entry in ("commands",):
+            for child in sorted(os.listdir(path)):
+                if child.startswith(".") or child == "index.json":
+                    continue
+                child_path = os.path.join(path, child)
+                rel_name = os.path.join(entry, child)
+                meta = _skill_metadata(child_path, rel_name=rel_name)
+                files = []
+                if os.path.isdir(child_path):
+                    for root, _dirs, fnames in os.walk(child_path):
+                        for fname in sorted(fnames):
+                            full = os.path.join(root, fname)
+                            files.append(os.path.relpath(full, SKILLS_DIR))
+                else:
+                    files.append(rel_name)
+                meta["files"] = files
+                meta["category"] = entry
+                skills.append(meta)
+            continue
+        meta = _skill_metadata(path)
+        files = []
+        if os.path.isdir(path):
+            for root, _dirs, fnames in os.walk(path):
+                for fname in sorted(fnames):
+                    full = os.path.join(root, fname)
+                    files.append(os.path.relpath(full, SKILLS_DIR))
+        else:
+            files.append(entry)
+        meta["files"] = files
+        skills.append(meta)
+    return skills
+
+
+def _scan_skills(source_dir, prefix=""):
+    """Mirror top-level skills from a local source dir into SKILLS_DIR."""
+    if not source_dir or not os.path.isdir(source_dir):
+        return 0
+    target_dir = os.path.join(SKILLS_DIR, prefix) if prefix else SKILLS_DIR
+    os.makedirs(target_dir, exist_ok=True)
+    count = 0
+    for entry in os.listdir(source_dir):
+        if entry.startswith(".") or entry == "index.json":
+            continue
+        src = os.path.join(source_dir, entry)
+        dst = os.path.join(target_dir, entry)
+        if os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst, symlinks=False)
+        elif os.path.isfile(src):
+            if os.path.exists(dst):
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                else:
+                    os.remove(dst)
+            shutil.copy2(src, dst)
+        else:
+            continue
+        count += 1
+    return count
+
+
+@app.route("/api/skills")
+def skills_list():
+    """Return the central skill inventory."""
+    return jsonify({"ok": True, "skills": _build_skills_index()})
+
+
+@app.route("/api/skills/refresh", methods=["POST"])
+def skills_refresh():
+    """Rescan local Claude Code and Codex skill directories."""
+    try:
+        data = request.get_json(silent=True) or {}
+        sources = data.get("sources") or [
+            os.path.expanduser("~/.claude/skills"),
+            os.path.expanduser("~/.claude/commands"),
+            os.path.expanduser("~/.codex/skills"),
+            os.path.expanduser("~/.codex/commands"),
+        ]
+        prefixes = data.get("prefixes") or {
+            os.path.expanduser("~/.claude/commands"): "commands",
+            os.path.expanduser("~/.codex/commands"): "commands",
+        }
+        counts = {}
+        for src in sources:
+            if os.path.isdir(src):
+                counts[src] = _scan_skills(src, prefix=prefixes.get(src, ""))
+        index = {
+            "version": 1,
+            "refreshedAt": datetime.now(tz=timezone.utc).isoformat(),
+            "sources": counts,
+            "skills": _build_skills_index(),
+        }
+        with open(os.path.join(SKILLS_DIR, "index.json"), "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False, indent=2)
+        return jsonify({"ok": True, "sources": counts, "skills": index["skills"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/skills/<path:name>")
+def skill_detail(name):
+    """Return metadata and file list for one skill."""
+    path = safe_join(SKILLS_DIR, name)
+    if not path or not os.path.exists(path):
+        return jsonify({"ok": False, "error": "skill not found"}), 404
+    meta = _skill_metadata(path, rel_name=name)
+    meta["files"] = []
+    if os.path.isdir(path):
+        for root, _dirs, fnames in os.walk(path):
+            for fname in sorted(fnames):
+                full = os.path.join(root, fname)
+                meta["files"].append(os.path.relpath(full, SKILLS_DIR))
+    else:
+        meta["files"].append(name)
+    return jsonify({"ok": True, "skill": meta})
+
+
+@app.route("/api/skills/<path:name>/content/<path:filepath>")
+def skill_content(name, filepath):
+    """Serve a file within a skill."""
+    safe_path = safe_join(SKILLS_DIR, name, filepath)
+    if not safe_path or not os.path.isfile(safe_path):
+        return jsonify({"ok": False, "error": "not found"}), 404
+    rel = os.path.relpath(safe_path, SKILLS_DIR)
+    return send_from_directory(SKILLS_DIR, rel)
+
+
+@app.route("/api/skills/bundle")
+def skill_bundle():
+    """Download selected skills as a zip for installation on a terminal."""
+    names = request.args.get("names", "")
+    target = request.args.get("target", "claude")
+    if not names:
+        return jsonify({"ok": False, "error": "names required"}), 400
+    selected = [n.strip() for n in names.split(",") if n.strip()]
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in selected:
+            path = safe_join(SKILLS_DIR, name)
+            if not path or not os.path.exists(path):
+                continue
+            if os.path.isdir(path):
+                for root, _dirs, fnames in os.walk(path):
+                    for fname in fnames:
+                        full = os.path.join(root, fname)
+                        arc = os.path.relpath(full, SKILLS_DIR)
+                        zf.write(full, arc)
+            else:
+                arc = os.path.relpath(path, SKILLS_DIR)
+                zf.write(path, arc)
+    buf.seek(0)
+    filename = f"skills-{target}-{int(time.time())}.zip"
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=filename)
 
 
 # ── Static Frontend (Next.js export) ────────────────────────────────
