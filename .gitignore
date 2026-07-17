@@ -30,7 +30,13 @@ Thumbs.db
 
 # Backups
 *.bak
-app.py.bak.*
+*.bak.*
+
+# Local agent/session files
+.claude/
+findings.md
+progress.md
+task_plan.md
 
 # Logs
 *.log
