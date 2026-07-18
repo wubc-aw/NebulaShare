@@ -19,6 +19,7 @@ import {
   BookOpen,
   ChevronDown,
   Menu,
+  Terminal,
   X,
 } from "lucide-react"
 
@@ -30,7 +31,17 @@ interface NavItem {
   icon: React.ElementType
   href: string
   shortcut?: string
+  external?: boolean
   children?: { id: string; label: string; href: string }[]
+}
+
+// agent-terminal (SoA-Web) 服务端口，部署端口变化时同步调整；
+// 服务监听 0.0.0.0，入口跟随当前访问 Nebula 的主机名（局域网/ Tailscale 各自直连）
+const TERMINAL_PORT = 7332
+
+function getTerminalUrl() {
+  if (typeof window === "undefined") return `http://127.0.0.1:${TERMINAL_PORT}`
+  return `${window.location.protocol}//${window.location.hostname}:${TERMINAL_PORT}`
 }
 
 const navItems: NavItem[] = [
@@ -52,6 +63,7 @@ const navItems: NavItem[] = [
   },
   { id: "mcp", label: "MCP工具", icon: Wrench, href: "/mcp", shortcut: "6" },
   { id: "skills", label: "Skill 中心", icon: BookOpen, href: "/skills", shortcut: "7" },
+  { id: "terminal", label: "终端", icon: Terminal, href: "/terminal", shortcut: "8", external: true },
 ]
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -60,6 +72,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     knowledge: true,
   })
   const [mobileOpen, setMobileOpen] = useState(false)
+  // 终端入口地址：初始值与预渲染保持一致，挂载后替换为当前访问主机名
+  const [terminalHref, setTerminalHref] = useState(`http://127.0.0.1:${TERMINAL_PORT}`)
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/"
@@ -87,14 +101,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [mobileOpen])
 
-  // Keyboard shortcuts ⌘1-6 for zone pages
+  // Resolve terminal URL against the host the page was reached on
+  useEffect(() => {
+    setTerminalHref(getTerminalUrl())
+  }, [])
+
+  // Keyboard shortcuts ⌘1-8 for zone pages
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey) {
         const zoneItem = navItems.find((n) => n.shortcut === e.key && n.id !== "home")
         if (zoneItem) {
           e.preventDefault()
-          window.location.href = zoneItem.href
+          window.location.href = zoneItem.external ? getTerminalUrl() : zoneItem.href
         }
       }
     }
@@ -139,7 +158,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <nav className="flex-1 px-3 py-2 space-y-0.5 overflow-auto">
           {navItems.map((item) => {
             const Icon = item.icon
-            const active = isActive(item.href)
+            const active = item.external ? false : isActive(item.href)
             const hasChildren = !!item.children?.length
             const isExpanded = expandedGroups[item.id]
 
@@ -181,6 +200,30 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       </kbd>
                     )}
                   </button>
+                ) : item.external ? (
+                  <a
+                    href={terminalHref}
+                    className={cn(
+                      "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 group relative",
+                      active
+                        ? "text-sidebar-primary-foreground bg-sidebar-primary/10"
+                        : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"
+                    )}
+                  >
+                    <Icon
+                      className={cn(
+                        "w-[18px] h-[18px] shrink-0 transition-colors",
+                        active ? "text-primary" : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground/80"
+                      )}
+                      strokeWidth={1.5}
+                    />
+                    <span className="flex-1 nav-label">{item.label}</span>
+                    {item.shortcut && (
+                      <kbd className="hidden text-[10px] font-mono text-sidebar-foreground/40 group-hover:text-sidebar-foreground/60 px-1 py-0.5 rounded bg-sidebar-accent/30">
+                        ⌘{item.shortcut}
+                      </kbd>
+                    )}
+                  </a>
                 ) : (
                   <Link
                     href={item.href}
