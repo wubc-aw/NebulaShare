@@ -1990,23 +1990,74 @@ def api_pc_shutdown():
 
 _sys_lock = threading.Lock()
 _sys_cpu_prev = None        # (idle, total) from /proc/stat
+_sys_core_prev = None       # {core_id: (idle, total)} from /proc/stat
 _sys_cpu_prev_ts = 0.0
+
+
+def _parse_cpu_idle_total(line):
+    parts = line.split()
+    if not parts or not parts[0].startswith("cpu"):
+        return None
+    try:
+        nums = [int(x) for x in parts[1:]]
+    except ValueError:
+        return None
+    if len(nums) < 4:
+        return None
+    # idle + iowait
+    return nums[3] + (nums[4] if len(nums) > 4 else 0), sum(nums)
 
 
 def _read_cpu_idle_total():
     try:
         with open("/proc/stat", "r") as f:
             line = f.readline()
-        parts = line.split()
-        if not parts or parts[0] != "cpu":
-            return None
-        nums = [int(x) for x in parts[1:]]
-        # idle + iowait
-        idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
-        total = sum(nums)
-        return (idle, total)
+        return _parse_cpu_idle_total(line) if line.startswith("cpu ") else None
     except Exception:
         return None
+
+
+def _read_cpu_core_idle_totals():
+    """Return per-core idle/total jiffies keyed by CPU index."""
+    cores = {}
+    try:
+        with open("/proc/stat", "r") as f:
+            for line in f:
+                if not line.startswith("cpu"):
+                    break
+                name = line.split(None, 1)[0]
+                if name == "cpu" or not name[3:].isdigit():
+                    continue
+                times = _parse_cpu_idle_total(line)
+                if times is not None:
+                    cores[int(name[3:])] = times
+    except Exception:
+        pass
+    return cores
+
+
+def _cpu_percent(previous, current):
+    if previous is None or current is None:
+        return None
+    d_idle = current[0] - previous[0]
+    d_total = current[1] - previous[1]
+    if d_total <= 0:
+        return None
+    return max(0.0, min(100.0, 100.0 * (1 - d_idle / d_total)))
+
+
+def _read_cpu_frequency_mhz(core_id):
+    paths = [
+        f"/sys/devices/system/cpu/cpu{core_id}/cpufreq/scaling_cur_freq",
+        f"/sys/devices/system/cpu/cpu{core_id}/cpufreq/cpuinfo_cur_freq",
+    ]
+    for path in paths:
+        try:
+            with open(path, "r") as f:
+                return round(int(f.read().strip()) / 1000.0)
+        except Exception:
+            continue
+    return None
 
 
 def _read_meminfo():
@@ -2023,20 +2074,107 @@ def _read_meminfo():
     return info
 
 
-def _read_temp_c():
-    try:
-        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-            return int(f.read().strip()) / 1000.0
-    except Exception:
-        pass
-    try:
-        out = subprocess.run(["vcgencmd", "measure_temp"],
-                             capture_output=True, text=True, timeout=1).stdout
-        if "=" in out:
-            return float(out.split("=", 1)[1].split("'", 1)[0])
-    except Exception:
-        pass
-    return None
+def _read_temperature_sensors():
+    """Read all available thermal sensors and choose the CPU package sensor.
+
+    Raspberry Pi exposes its CPU through thermal_zone0/vcgencmd, while Intel
+    systems expose the package through the coretemp hwmon device. Reading a
+    fixed thermal_zone0 on x86 commonly returns ACPI ambient temperature.
+    """
+    sensors = []
+    hwmon_names = set()
+
+    for hwmon_path in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            with open(os.path.join(hwmon_path, "name"), "r") as f:
+                source = f.read().strip()
+        except Exception:
+            source = os.path.basename(hwmon_path)
+        hwmon_names.add(source.lower())
+
+        for input_path in sorted(glob.glob(os.path.join(hwmon_path, "temp*_input"))):
+            base_path = input_path[:-len("_input")]
+            try:
+                with open(input_path, "r") as f:
+                    value_c = int(f.read().strip()) / 1000.0
+            except Exception:
+                continue
+            try:
+                with open(base_path + "_label", "r") as f:
+                    raw_label = f.read().strip()
+            except Exception:
+                raw_label = ""
+
+            source_lower = source.lower()
+            label_lower = raw_label.lower()
+            role = "sensor"
+            label = raw_label or source
+            if source_lower == "coretemp":
+                if label_lower.startswith("package"):
+                    label = "CPU Package"
+                    role = "cpu_package"
+                elif label_lower.startswith("core"):
+                    label = f"CPU {raw_label}"
+                    role = "cpu_core"
+            elif source_lower == "nvme":
+                label = f"NVMe {raw_label or 'Composite'}"
+                role = "storage"
+            elif source_lower.startswith("iwlwifi"):
+                label = "Wi-Fi"
+            elif source_lower == "acpitz":
+                label = "ACPI Thermal Zone"
+
+            sensors.append({
+                "id": f"{source_lower}:{os.path.basename(base_path)}",
+                "label": label,
+                "source": source,
+                "temperature_c": round(value_c, 1),
+                "role": role,
+            })
+
+    # Thermal zones are required by Raspberry Pi. Skip zones already covered
+    # by a hwmon device to avoid duplicate ACPI readings on x86.
+    for zone_path in sorted(glob.glob("/sys/class/thermal/thermal_zone*")):
+        try:
+            with open(os.path.join(zone_path, "type"), "r") as f:
+                zone_type = f.read().strip()
+            with open(os.path.join(zone_path, "temp"), "r") as f:
+                value_c = int(f.read().strip()) / 1000.0
+        except Exception:
+            continue
+        if zone_type.lower() in hwmon_names:
+            continue
+        role = "cpu_package" if zone_type.lower() == "cpu-thermal" else "sensor"
+        label = "CPU Package" if role == "cpu_package" else zone_type
+        sensors.append({
+            "id": os.path.basename(zone_path),
+            "label": label,
+            "source": zone_type,
+            "temperature_c": round(value_c, 1),
+            "role": role,
+        })
+
+    if not sensors:
+        try:
+            out = subprocess.run(["vcgencmd", "measure_temp"],
+                                 capture_output=True, text=True, timeout=1).stdout
+            if "=" in out:
+                sensors.append({
+                    "id": "vcgencmd",
+                    "label": "CPU Package",
+                    "source": "vcgencmd",
+                    "temperature_c": round(float(out.split("=", 1)[1].split("'", 1)[0]), 1),
+                    "role": "cpu_package",
+                })
+        except Exception:
+            pass
+
+    rank = {"cpu_package": 0, "cpu_core": 1, "storage": 2, "sensor": 3}
+    sensors.sort(key=lambda sensor: (rank.get(sensor["role"], 9), sensor["label"]))
+    primary = next((sensor for sensor in sensors if sensor["role"] == "cpu_package"), None)
+    if primary is None and sensors:
+        primary = sensors[0]
+    return primary, sensors
 
 
 def _read_throttle():
@@ -2311,7 +2449,7 @@ def api_kill_process(pid):
 
 @app.route("/api/system/stats")
 def api_system_stats():
-    global _sys_cpu_prev, _sys_cpu_prev_ts
+    global _sys_cpu_prev, _sys_core_prev, _sys_cpu_prev_ts
 
     now = time.time()
 
@@ -2319,29 +2457,38 @@ def api_system_stats():
     # On a cold/stale prev, do an inline 200ms re-sample so the very first
     # request still returns a real value instead of null.
     cur = _read_cpu_idle_total()
+    core_cur = _read_cpu_core_idle_totals()
     cpu_pct = None
     with _sys_lock:
         prev = _sys_cpu_prev
+        core_prev = _sys_core_prev
         prev_ts = _sys_cpu_prev_ts
 
     if cur is not None and (prev is None or (now - prev_ts) > 10.0):
         time.sleep(0.2)
         cur2 = _read_cpu_idle_total()
+        core_cur2 = _read_cpu_core_idle_totals()
         if cur2 is not None:
-            d_idle = cur2[0] - cur[0]
-            d_total = cur2[1] - cur[1]
-            if d_total > 0:
-                cpu_pct = max(0.0, min(100.0, 100.0 * (1 - d_idle / d_total)))
+            cpu_pct = _cpu_percent(cur, cur2)
             cur = cur2
+            core_prev = core_cur
+            core_cur = core_cur2
     elif cur is not None and prev is not None:
-        d_idle = cur[0] - prev[0]
-        d_total = cur[1] - prev[1]
-        if d_total > 0:
-            cpu_pct = max(0.0, min(100.0, 100.0 * (1 - d_idle / d_total)))
+        cpu_pct = _cpu_percent(prev, cur)
 
     with _sys_lock:
         _sys_cpu_prev = cur
+        _sys_core_prev = core_cur
         _sys_cpu_prev_ts = now
+
+    cpu_cores = []
+    for core_id in sorted(core_cur):
+        usage_pct = _cpu_percent((core_prev or {}).get(core_id), core_cur[core_id])
+        cpu_cores.append({
+            "id": core_id,
+            "usage_percent": round(usage_pct, 1) if usage_pct is not None else None,
+            "frequency_mhz": _read_cpu_frequency_mhz(core_id),
+        })
 
     # ── Memory ──
     mem = _read_meminfo()
@@ -2372,8 +2519,9 @@ def api_system_stats():
     except Exception:
         pass
 
-    # ── Temp + throttle (Pi-specific, gracefully None on non-Pi) ──
-    temp_c = _read_temp_c()
+    # ── Temperature + throttle ──
+    cpu_temp_sensor, temperature_sensors = _read_temperature_sensors()
+    temp_c = cpu_temp_sensor["temperature_c"] if cpu_temp_sensor else None
     throttle_raw, throttle_now, throttle_history = _read_throttle()
 
     # ── Uptime + load ──
@@ -2393,6 +2541,7 @@ def api_system_stats():
         "stats": {
             "cpu_percent": round(cpu_pct, 1) if cpu_pct is not None else None,
             "cpu_count": os.cpu_count() or 1,
+            "cpu_cores": cpu_cores,
             "load_1": round(load[0], 2),
             "load_5": round(load[1], 2),
             "load_15": round(load[2], 2),
@@ -2403,7 +2552,9 @@ def api_system_stats():
             "hdd_total": hdd_total, "hdd_used": hdd_used, "hdd_free": hdd_free,
             "hdd_percent": round(hdd_pct, 1),
             "hdd_mounted": hdd_mounted,
-            "temp_c": round(temp_c, 1) if temp_c is not None else None,
+            "temp_c": temp_c,
+            "temp_sensor_label": cpu_temp_sensor["label"] if cpu_temp_sensor else None,
+            "temperature_sensors": temperature_sensors,
             "throttle_raw": throttle_raw,
             "throttle_now": throttle_now,
             "throttle_history": throttle_history,

@@ -12,11 +12,31 @@ interface Process {
   runtime: string
 }
 
+interface CpuCore {
+  id: number
+  usage_percent: number | null
+  frequency_mhz: number | null
+}
+
+interface TemperatureSensor {
+  id: string
+  label: string
+  source: string
+  temperature_c: number
+  role: string
+}
+
 interface SystemStats {
-  cpu_percent: number
+  cpu_percent: number | null
+  cpu_count: number
+  cpu_cores: CpuCore[]
   mem_used: number
   mem_total: number
+  mem_avail: number
+  mem_percent: number
   temp_c: number | null
+  temp_sensor_label: string | null
+  temperature_sensors: TemperatureSensor[]
   disk_used: number
   disk_total: number
   disk_percent: number
@@ -137,7 +157,7 @@ export function HostStatusBar() {
 
   const displayStats = stats
     ? {
-        cpu: stats.cpu_percent.toFixed(1),
+        cpu: stats.cpu_percent !== null ? stats.cpu_percent.toFixed(1) : "--",
         memory: formatBytes(stats.mem_used),
         temp: stats.temp_c,
         up: stats.load_1.toFixed(2),
@@ -172,17 +192,17 @@ export function HostStatusBar() {
 
         {/* Inline metrics, monospace numbers */}
         <div className="flex items-center gap-x-2 text-sm text-muted-foreground font-mono overflow-x-auto whitespace-nowrap scrollbar-hide">
-          <span>
-            CPU <span className="text-foreground">{displayStats.cpu}%</span>
+            <span>
+              CPU <span className="text-foreground">{displayStats.cpu}{displayStats.cpu === "--" ? "" : "%"}</span>
           </span>
           <span className="text-border">·</span>
           <span>
             RAM <span className="text-foreground">{displayStats.memory}</span>
           </span>
           <span className="text-border">·</span>
-          <span>
-            <span className={cn(getTempColor(displayStats.temp))}>
-              {displayStats.temp !== null ? `${displayStats.temp}°C` : "--°C"}
+            <span>
+              <span className={cn(getTempColor(displayStats.temp))}>
+              {displayStats.temp !== null ? `CPU ${displayStats.temp}°C` : "CPU --°C"}
             </span>
           </span>
           <span className="text-border">·</span>
@@ -223,6 +243,80 @@ export function HostStatusBar() {
               >
                 <X className="w-4 h-4" strokeWidth={1.5} />
               </button>
+            </div>
+
+            {/* System Details */}
+            {stats && (
+              <section className="mb-6 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-medium">系统状态</h4>
+                  <span className="text-xs text-muted-foreground font-mono">{stats.cpu_count} 核 CPU</span>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-lg border border-border/60 bg-secondary/30 p-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">CPU 总负载</span>
+                      <span className="font-mono">{displayStats.cpu}{displayStats.cpu === "--" ? "" : "%"}</span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      {stats.cpu_cores.map((core) => (
+                        <div key={core.id} className="rounded-md bg-background/60 px-2 py-1.5">
+                          <div className="flex justify-between text-[11px] text-muted-foreground">
+                            <span>Core {core.id}</span>
+                            <span>{core.frequency_mhz ? `${core.frequency_mhz}MHz` : "--"}</span>
+                          </div>
+                          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
+                            <div
+                              className={cn("h-full rounded-full", (core.usage_percent ?? 0) >= 85 ? "bg-destructive" : (core.usage_percent ?? 0) >= 60 ? "bg-warning" : "bg-success")}
+                              style={{ width: `${core.usage_percent ?? 0}%` }}
+                            />
+                          </div>
+                          <div className="mt-1 text-right text-xs font-mono">{core.usage_percent !== null ? `${core.usage_percent}%` : "--"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border/60 bg-secondary/30 p-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">内存占用</span>
+                      <span className="font-mono">{stats.mem_percent.toFixed(1)}%</span>
+                    </div>
+                    <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+                      <div className="h-full rounded-full bg-primary" style={{ width: `${stats.mem_percent}%` }} />
+                    </div>
+                    <div className="mt-2 flex justify-between text-xs text-muted-foreground font-mono">
+                      <span>已用 {formatBytes(stats.mem_used)}</span>
+                      <span>可用 {formatBytes(stats.mem_avail)}</span>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border/60 bg-secondary/30 p-3 md:col-span-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">温度传感器</span>
+                      <span className={cn("font-mono", getTempColor(stats.temp_c))}>
+                        {stats.temp_sensor_label ?? "CPU Package"} {stats.temp_c !== null ? `${stats.temp_c}°C` : "--"}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                      {stats.temperature_sensors.map((sensor) => (
+                        <div key={sensor.id} className="rounded-md bg-background/60 px-2.5 py-2">
+                          <div className="truncate text-xs text-muted-foreground" title={sensor.source}>{sensor.label}</div>
+                          <div className={cn("mt-1 text-sm font-mono", getTempColor(sensor.temperature_c))}>{sensor.temperature_c.toFixed(1)}°C</div>
+                        </div>
+                      ))}
+                      {stats.temperature_sensors.length === 0 && (
+                        <div className="text-sm text-muted-foreground">未检测到温度传感器</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            <div className="mb-3 flex items-center justify-between">
+              <h4 className="text-sm font-medium">进程列表</h4>
+              <span className="text-xs text-muted-foreground">按 CPU 与内存占用排序</span>
             </div>
 
             {/* Search */}
